@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">세라젬 일괄조작</string>
+    <string name="a11y_desc">세라젬 IoT 앱의 화면을 읽고 대신 눌러서 여러 대의 기기를 한 번에 켜고, 작동시키고, 끕니다. 화면 내용은 저장하거나 외부로 보내지 않습니다(화면 분석 버튼을 눌렀을 때만 파일로 저장).</string>
+    <string name="sc_on">전체 켜기</string>
+    <string name="sc_run">전체 실행</string>
+    <string name="sc_off">전체 끄기</string>
+</resources>

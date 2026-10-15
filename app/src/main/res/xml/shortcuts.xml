@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_app"
+        android:shortcutId="on"
+        android:shortcutShortLabel="@string/sc_on">
+        <intent
+            android:action="com.jinanhealing.ceragemmacro.ON"
+            android:targetClass="com.jinanhealing.ceragemmacro.MainActivity"
+            android:targetPackage="com.jinanhealing.ceragemmacro" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_app"
+        android:shortcutId="run"
+        android:shortcutShortLabel="@string/sc_run">
+        <intent
+            android:action="com.jinanhealing.ceragemmacro.RUN"
+            android:targetClass="com.jinanhealing.ceragemmacro.MainActivity"
+            android:targetPackage="com.jinanhealing.ceragemmacro" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_app"
+        android:shortcutId="off"
+        android:shortcutShortLabel="@string/sc_off">
+        <intent
+            android:action="com.jinanhealing.ceragemmacro.OFF"
+            android:targetClass="com.jinanhealing.ceragemmacro.MainActivity"
+            android:targetPackage="com.jinanhealing.ceragemmacro" />
+    </shortcut>
+</shortcuts>
