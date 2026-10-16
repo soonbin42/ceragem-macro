@@ -210,11 +210,28 @@ public class MacroService extends AccessibilityService {
         AccessibilityNodeInfo power = waitFor(() -> findById(c.powerId), 12000);
         if (power == null) return Result.fail("기기 화면이 열리지 않음");
 
-        if (mode == MODE_ON || mode == MODE_OFF) {
+        if (mode == MODE_ON) {
             sleep(pick(800, 400, 150));
+            if (findExactText("전원을 켜 주세요") == null && findExactText("전원을 켜주세요") == null) {
+                return Result.skip("이미 켜져 있음");
+            }
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
             sleep(pick(2000, 1000, 600));
-            return Result.ok(mode == MODE_ON ? "켰음" : "껐음");
+            return Result.ok("켰음");
+        }
+        if (mode == MODE_OFF) {
+            sleep(pick(800, 400, 200));
+            if (findExactText("전원을 켜 주세요") != null || findExactText("전원을 켜주세요") != null) {
+                return Result.skip("이미 꺼져 있음");
+            }
+            AccessibilityNodeInfo offBtn = findOffButton();
+            if (offBtn == null) return Result.fail("오른쪽 위 전원 버튼을 찾지 못함");
+            if (!clickNode(offBtn)) return Result.fail("전원 버튼을 누르지 못함");
+            AccessibilityNodeInfo done = waitFor(() -> {
+                AccessibilityNodeInfo a = findExactText("전원을 켜 주세요");
+                return a != null ? a : findExactText("전원을 켜주세요");
+            }, pick(5000, 4000, 3000));
+            return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
         return runMassage(c);
     }
@@ -378,6 +395,45 @@ public class MacroService extends AccessibilityService {
             int d = r.top - a.bottom;
             if (d < bestDist) {
                 bestDist = d;
+                best = n;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 켜진 기기 화면 오른쪽 위의 붉은 테두리 전원 버튼.
+     * 1) 이름·설명에 power/전원이 들어간 버튼 → 2) 오른쪽 위 영역의 작은 버튼 중 가장 아래쪽(⋯ 메뉴 아래).
+     */
+    private AccessibilityNodeInfo findOffButton() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        Rect screen = screenRect();
+        if (root == null || screen == null) return null;
+        List<AccessibilityNodeInfo> nodes = allNodes(root);
+        for (AccessibilityNodeInfo n : nodes) {
+            if (!n.isVisibleToUser()) continue;
+            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName().toLowerCase(Locale.US);
+            String desc = n.getContentDescription() == null ? "" : n.getContentDescription().toString();
+            if (id.contains("power") || desc.contains("전원") || desc.toLowerCase(Locale.US).contains("power")) {
+                Rect r = new Rect();
+                n.getBoundsInScreen(r);
+                if (r.centerY() < screen.top + screen.height() * 0.3) return n;
+            }
+        }
+        AccessibilityNodeInfo best = null;
+        int bestTop = -1;
+        for (AccessibilityNodeInfo n : nodes) {
+            if (!n.isClickable() || !n.isVisibleToUser()) continue;
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (r.width() > screen.width() * 0.22 || r.height() > screen.height() * 0.12) continue;
+            if (r.centerX() < screen.left + screen.width() * 0.78) continue;
+            if (r.centerY() < screen.top + screen.height() * 0.035 || r.centerY() > screen.top + screen.height() * 0.25) continue;
+            String desc = (n.getContentDescription() == null ? "" : n.getContentDescription().toString())
+                    + (n.getText() == null ? "" : n.getText().toString());
+            if (desc.contains("더보기") || desc.contains("메뉴") || desc.contains("⋯") || desc.contains("...")) continue;
+            if (r.top > bestTop) {
+                bestTop = r.top;
                 best = n;
             }
         }
