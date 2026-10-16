@@ -42,6 +42,12 @@ public class MacroService extends AccessibilityService {
 
     public static volatile MacroService instance;
 
+    private static final String ID_POWER_OFF = "kr.co.ceragem.iot:id/do_power_off";
+    private static final String ID_PLAY = "kr.co.ceragem.iot:id/control_play";
+    private static final String ID_MODE_PAGES = "kr.co.ceragem.iot:id/summary_graph_pages";
+    private static final String ID_MODE_TITLE = "kr.co.ceragem.iot:id/page_widget_03";
+    private static final String ID_PROGRESS = "kr.co.ceragem.iot:id/massage_progress_message";
+
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean running = false;
     private volatile boolean stopRequested = false;
@@ -212,7 +218,7 @@ public class MacroService extends AccessibilityService {
 
         if (mode == MODE_ON) {
             sleep(pick(800, 400, 150));
-            if (findExactText("전원을 켜 주세요") == null && findExactText("전원을 켜주세요") == null) {
+            if (visibleText("전원을 켜 주세요") == null && visibleText("전원을 켜주세요") == null) {
                 return Result.skip("이미 켜져 있음");
             }
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
@@ -221,15 +227,15 @@ public class MacroService extends AccessibilityService {
         }
         if (mode == MODE_OFF) {
             sleep(pick(800, 400, 200));
-            if (findExactText("전원을 켜 주세요") != null || findExactText("전원을 켜주세요") != null) {
+            if (visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null) {
                 return Result.skip("이미 꺼져 있음");
             }
             AccessibilityNodeInfo offBtn = findOffButton();
             if (offBtn == null) return Result.fail("오른쪽 위 전원 버튼을 찾지 못함");
             if (!clickNode(offBtn)) return Result.fail("전원 버튼을 누르지 못함");
             AccessibilityNodeInfo done = waitFor(() -> {
-                AccessibilityNodeInfo a = findExactText("전원을 켜 주세요");
-                return a != null ? a : findExactText("전원을 켜주세요");
+                AccessibilityNodeInfo a = visibleText("전원을 켜 주세요");
+                return a != null ? a : visibleText("전원을 켜주세요");
             }, pick(5000, 4000, 3000));
             return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
@@ -237,8 +243,8 @@ public class MacroService extends AccessibilityService {
     }
 
     private Result runMassage(Config c) {
-        sleep(1200);
-        if (findExactText("마사지 중") != null) return Result.skip("이미 작동 중");
+        sleep(pick(1500, 1000, 700));
+        if (isMassageRunning()) return Result.skip("이미 작동 중");
 
         String mode = c.modeName == null ? "" : c.modeName.trim();
         if (!mode.isEmpty() && !selectMode(mode)) {
@@ -255,9 +261,17 @@ public class MacroService extends AccessibilityService {
         }
         if (!pressed) return Result.fail("▶ 버튼을 누르지 못함");
 
-        AccessibilityNodeInfo started = waitFor(() -> findExactText("마사지 중"), 7000);
+        AccessibilityNodeInfo started = waitFor(() -> isMassageRunning() ? getRootInActiveWindow() : null, 7000);
+        // ▶를 눌렀다면 확인이 안 되더라도 다시 누르지 않는다(두 번 누르면 멈출 수 있음)
         if (started != null) return Result.ok((mode.isEmpty() ? "" : mode + " ") + "작동 시작");
-        return Result.fail("▶를 눌렀지만 '마사지 중'이 확인되지 않음");
+        return Result.skip("▶ 누름 — 작동 여부 확인 안 됨");
+    }
+
+    /** "마사지 중" 또는 "척추 스캔중입니다." 같은 진행 화면이 보이면 작동 중. */
+    private boolean isMassageRunning() {
+        if (visibleText("마사지 중") != null) return true;
+        AccessibilityNodeInfo p = findById(ID_PROGRESS);
+        return p != null && p.isVisibleToUser();
     }
 
     // ---------------------------------------------------------------- 세라젬 화면 조작
@@ -328,8 +342,8 @@ public class MacroService extends AccessibilityService {
             for (int i = 0; i <= tries && !stopRequested; i++) {
                 if (isModeCentered(mode)) return true;
                 if (i == tries) break;
-                swipeCarousel(dir == 0);
-                sleep(1300);
+                if (!scrollModePager(dir == 0)) swipeCarousel(dir == 0);
+                sleep(pick(1300, 1000, 800));
             }
         }
         return isModeCentered(mode);
@@ -338,14 +352,52 @@ public class MacroService extends AccessibilityService {
     private boolean isModeCentered(String mode) {
         Rect screen = screenRect();
         if (screen == null) return false;
-        for (AccessibilityNodeInfo n : findAllExactText(mode)) {
+        String want = norm(mode);
+        List<AccessibilityNodeInfo> cands = new ArrayList<>();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) {
+            List<AccessibilityNodeInfo> byId = root.findAccessibilityNodeInfosByViewId(ID_MODE_TITLE);
+            if (byId != null) cands.addAll(byId);
+        }
+        cands.addAll(findAllExactText(mode));
+        for (AccessibilityNodeInfo n : cands) {
+            if (!norm(n.getText()).equals(want)) continue;
             Rect r = new Rect();
             n.getBoundsInScreen(r);
-            if (n.isVisibleToUser() && Math.abs(r.centerX() - screen.centerX()) < screen.width() * 0.18) {
-                return true;
-            }
+            if (!n.isVisibleToUser() || r.width() <= 0 || r.left < screen.left) continue;
+            if (Math.abs(r.centerX() - screen.centerX()) < screen.width() * 0.18) return true;
         }
         return false;
+    }
+
+    /** 모드 넘기기 화면을 접근성 스크롤로 한 칸 넘긴다. */
+    private boolean scrollModePager(boolean toNext) {
+        AccessibilityNodeInfo pager = findById(ID_MODE_PAGES);
+        if (pager == null || !pager.isScrollable()) return false;
+        return pager.performAction(toNext ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+    }
+
+    /** 같은 ID가 여러 장(모드 페이지마다)에 있을 때 화면 가운데에 있는 것. */
+    private AccessibilityNodeInfo findCenteredById(String id) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        Rect screen = screenRect();
+        if (root == null || screen == null) return null;
+        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByViewId(id);
+        if (found == null) return null;
+        AccessibilityNodeInfo best = null;
+        int bestD = Integer.MAX_VALUE;
+        for (AccessibilityNodeInfo n : found) {
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (!n.isVisibleToUser() || r.width() <= 0 || r.left < screen.left) continue;
+            int d = Math.abs(r.centerX() - screen.centerX());
+            if (d < bestD) {
+                bestD = d;
+                best = n;
+            }
+        }
+        return best;
     }
 
     private void swipeCarousel(boolean toNext) {
@@ -372,10 +424,9 @@ public class MacroService extends AccessibilityService {
     }
 
     private AccessibilityNodeInfo findPlay(Config c) {
-        if (c.playId != null && !c.playId.trim().isEmpty()) {
-            AccessibilityNodeInfo byId = findById(c.playId.trim());
-            if (byId != null) return byId;
-        }
+        String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
+        AccessibilityNodeInfo byId = findCenteredById(pid);
+        if (byId != null) return byId;
         AccessibilityNodeInfo anchor = statusAnchor();
         Rect screen = screenRect();
         AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -409,6 +460,8 @@ public class MacroService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         Rect screen = screenRect();
         if (root == null || screen == null) return null;
+        AccessibilityNodeInfo known = findById(ID_POWER_OFF);
+        if (known != null) return known;
         List<AccessibilityNodeInfo> nodes = allNodes(root);
         for (AccessibilityNodeInfo n : nodes) {
             if (!n.isVisibleToUser()) continue;
@@ -568,6 +621,12 @@ public class MacroService extends AccessibilityService {
             if (fallback == null) fallback = n;
         }
         return fallback;
+    }
+
+    /** 화면에 실제로 보이는 경우에만 돌려준다. */
+    private AccessibilityNodeInfo visibleText(String text) {
+        for (AccessibilityNodeInfo n : findAllExactText(text)) if (n.isVisibleToUser()) return n;
+        return null;
     }
 
     private AccessibilityNodeInfo findTextStartingWith(String head) {
