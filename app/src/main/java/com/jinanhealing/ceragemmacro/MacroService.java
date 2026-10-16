@@ -39,6 +39,7 @@ public class MacroService extends AccessibilityService {
     public static final int MODE_ON = 1;
     public static final int MODE_RUN = 2;
     public static final int MODE_OFF = 3;
+    public static final int MODE_ON_RUN = 4;
 
     public static volatile MacroService instance;
 
@@ -131,6 +132,7 @@ public class MacroService extends AccessibilityService {
             case MODE_ON: return "켜기";
             case MODE_RUN: return "실행";
             case MODE_OFF: return "끄기";
+            case MODE_ON_RUN: return "켜고 바로 실행";
             default: return "?";
         }
     }
@@ -144,7 +146,12 @@ public class MacroService extends AccessibilityService {
         new Thread(() -> {
             String report;
             try {
-                report = runAll(mode);
+                if (mode == MODE_ON_RUN) {
+                    report = runAll(MODE_ON);
+                    if (!stopRequested) report = report + "\n" + runAll(MODE_RUN);
+                } else {
+                    report = runAll(mode);
+                }
             } catch (Throwable t) {
                 report = "오류가 발생했어요: " + t;
             } finally {

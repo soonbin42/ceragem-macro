@@ -135,10 +135,34 @@ public class MainActivity extends Activity {
         a11yButton.setOnClickListener(v -> openA11ySettings());
         statusRow.addView(a11yButton);
 
-        // 큰 버튼 3개
-        root.addView(bigButton("전체 켜기", RED, v -> startMode(MacroService.MODE_ON)));
-        root.addView(bigButton("전체 실행 ▶", Color.parseColor("#1F6F50"), v -> startMode(MacroService.MODE_RUN)));
-        root.addView(bigButton("전체 끄기", Color.parseColor("#444444"), v -> startMode(MacroService.MODE_OFF)));
+        // 정사각형 버튼 2×2
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.addView(squareButton("전체\n켜기", "⚡", RED, v -> startMode(MacroService.MODE_ON)));
+        row1.addView(squareButton("전체\n실행", "▶", Color.parseColor("#1F6F50"), v -> startMode(MacroService.MODE_RUN)));
+        root.addView(row1);
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.addView(squareButton("전체\n끄기", "■", Color.parseColor("#444444"), v -> startMode(MacroService.MODE_OFF)));
+        row2.addView(squareButton("켜고\n바로 실행", "⚡▶", Color.parseColor("#B5651D"), v -> startMode(MacroService.MODE_ON_RUN)));
+        root.addView(row2);
+
+        // 대상 기기
+        root.addView(section("대상 기기"));
+        LinearLayout devCard = card(root);
+        grid = new GridLayout(this);
+        grid.setColumnCount(5);
+        devCard.addView(grid);
+        LinearLayout selRow = new LinearLayout(this);
+        selRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button all = smallButton("전체 선택");
+        all.setOnClickListener(v -> setAll(true));
+        Button none = smallButton("전체 해제");
+        none.setOnClickListener(v -> setAll(false));
+        selRow.addView(all);
+        selRow.addView(none);
+        devCard.addView(selRow);
+
 
         // 속도
         root.addView(section("속도"));
@@ -170,22 +194,6 @@ public class MainActivity extends Activity {
         reportView = text("", 14, INK, false);
         reportView.setTextIsSelectable(true);
         reportCard.addView(reportView);
-
-        // 대상 기기
-        root.addView(section("대상 기기"));
-        LinearLayout devCard = card(root);
-        grid = new GridLayout(this);
-        grid.setColumnCount(5);
-        devCard.addView(grid);
-        LinearLayout selRow = new LinearLayout(this);
-        selRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button all = smallButton("전체 선택");
-        all.setOnClickListener(v -> setAll(true));
-        Button none = smallButton("전체 해제");
-        none.setOnClickListener(v -> setAll(false));
-        selRow.addView(all);
-        selRow.addView(none);
-        devCard.addView(selRow);
 
         // 설정
         root.addView(section("설정"));
@@ -340,6 +348,38 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(76));
         lp.topMargin = dp(10);
+        b.setLayoutParams(lp);
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    /** 가로 폭만큼 세로도 맞추는 정사각형 버튼. */
+    private static class SquareButton extends Button {
+        SquareButton(android.content.Context c) {
+            super(c);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            super.onMeasure(widthMeasureSpec, widthMeasureSpec);
+        }
+    }
+
+    private Button squareButton(String label, String icon, int color, View.OnClickListener l) {
+        Button b = new SquareButton(this);
+        b.setText(icon + "\n\n" + label);
+        b.setTextSize(22);
+        b.setTextColor(Color.WHITE);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        b.setLineSpacing(0, 1.05f);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(20));
+        b.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(5), dp(5), dp(5), dp(5));
         b.setLayoutParams(lp);
         b.setOnClickListener(l);
         return b;
