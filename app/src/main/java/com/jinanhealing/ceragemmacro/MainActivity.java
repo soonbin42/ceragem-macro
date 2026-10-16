@@ -27,6 +27,7 @@ public class MainActivity extends Activity {
     public static final String EXTRA_SCROLL_BOTTOM = "scroll_bottom";
     public static volatile String lastReport = null;
     public static volatile String lastDump = null;
+    public static volatile String lastIssueReport = null;
 
     private static final String ACT_ON = "com.jinanhealing.ceragemmacro.ON";
     private static final String ACT_RUN = "com.jinanhealing.ceragemmacro.RUN";
@@ -42,7 +43,7 @@ public class MainActivity extends Activity {
     private GridLayout grid;
     private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit, changeNoEdit;
     private TextView reportView;
-    private Button shareDumpButton;
+    private Button shareDumpButton, shareIssueButton;
     private Config cfg;
 
     @Override
@@ -194,6 +195,9 @@ public class MainActivity extends Activity {
         reportView = text("", 14, INK, false);
         reportView.setTextIsSelectable(true);
         reportCard.addView(reportView);
+        shareIssueButton = smallButton("문제 리포트 공유");
+        shareIssueButton.setOnClickListener(v -> shareText(lastIssueReport, "세라젬 일괄조작 문제 리포트"));
+        reportCard.addView(shareIssueButton);
 
         // 설정
         root.addView(section("설정"));
@@ -240,6 +244,7 @@ public class MainActivity extends Activity {
         String r = lastReport;
         reportView.setText(r == null ? "아직 실행 기록이 없어요." : r);
         shareDumpButton.setVisibility(lastDump == null ? View.GONE : View.VISIBLE);
+        shareIssueButton.setVisibility(lastIssueReport == null ? View.GONE : View.VISIBLE);
     }
 
     private void rebuildGrid() {
@@ -293,14 +298,17 @@ public class MainActivity extends Activity {
     }
 
     private void shareDump() {
-        String d = lastDump;
+        shareText(lastDump, "세라젬 화면 분석");
+    }
+
+    private void shareText(String d, String subject) {
         if (d == null) return;
         if (d.length() > 150000) d = d.substring(0, 150000) + "\n…(생략)";
         Intent s = new Intent(Intent.ACTION_SEND);
         s.setType("text/plain");
-        s.putExtra(Intent.EXTRA_SUBJECT, "세라젬 화면 분석");
+        s.putExtra(Intent.EXTRA_SUBJECT, subject);
         s.putExtra(Intent.EXTRA_TEXT, d);
-        startActivity(Intent.createChooser(s, "화면 분석 결과 보내기"));
+        startActivity(Intent.createChooser(s, subject + " 보내기"));
     }
 
     // ---------------------------------------------------------------- 작은 위젯 도우미

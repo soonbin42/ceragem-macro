@@ -60,6 +60,11 @@ public class MacroService extends AccessibilityService {
     private volatile int speed = 2;
     private long lastVolDown = 0;
 
+    // ---- 문제 리포트(실패·앱 재실행 이유 기록)
+    private final StringBuilder diag = new StringBuilder();
+    private int issues = 0;
+    private String relaunchReason = "처음 시작";
+
     /** 속도에 따라 대기 시간을 고른다. */
     private long pick(long safe, long normal, long fast) {
         return speed <= 0 ? safe : speed == 1 ? normal : fast;
@@ -188,6 +193,11 @@ public class MacroService extends AccessibilityService {
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
         boolean relaunch = true; // 처음 한 번만 앱을 새로 연다
+        diag.setLength(0);
+        issues = 0;
+        relaunchReason = "처음 시작";
+        log("시작: 전체 " + modeLabel(mode) + " · 기기 " + devices + " · 속도 " + speed
+                + " · 실행 페이지 '" + c.modeName + "'");
         for (int k = 0; k < devices.size(); k++) {
             if (stopRequested) {
                 lines.append("⏹ 사용자가 중지함\n");
@@ -195,13 +205,34 @@ public class MacroService extends AccessibilityService {
             }
             String name = c.deviceName(devices.get(k));
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
+            log("── " + name);
             Result r = doDevice(c, mode, name, relaunch);
+            if (r.kind == Result.FAIL) {
+                issues++;
+                log("❌ 실패: " + r.msg + (r.noRetry ? " (▶를 이미 눌러서 재시도 안 함)" : ""));
+                snapshot(name + " 실패 직후");
+            }
             if (r.kind == Result.FAIL && !r.noRetry && !stopRequested) {
                 toast(name + " 다시 시도");
+                relaunchReason = name + " 재시도 (" + r.msg + ")";
                 r = doDevice(c, mode, name, true);
+                if (r.kind == Result.FAIL) {
+                    log("❌ 재시도도 실패: " + r.msg);
+                    snapshot(name + " 재시도 실패 직후");
+                } else {
+                    log("재시도 결과: " + r.msg);
+                }
+            } else if (r.kind != Result.FAIL) {
+                log("결과: " + r.msg);
             }
             // 목록으로 빨리 돌아왔으면 다음 기기는 앱을 다시 열지 않는다
             relaunch = stopRequested || !returnToList(c);
+            if (relaunch && !stopRequested && k < devices.size() - 1) {
+                issues++;
+                relaunchReason = name + " 뒤 목록으로 돌아오지 못함";
+                log("⚠ 뒤로가기 3번으로도 목록에 못 돌아옴 → 다음 기기에서 세라젬 앱을 새로 엶");
+                snapshot(name + " 뒤 목록 복귀 실패");
+            }
             if (r.kind == Result.OK) ok++;
             else if (r.kind == Result.SKIP) skip++;
             else fail++;
@@ -211,9 +242,15 @@ public class MacroService extends AccessibilityService {
         String when = new SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(new Date());
         long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
         String[] sp = {"안정", "보통", "빠름"};
-        return "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
+        String summary = "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
                 + lines;
+        if (issues > 0) {
+            String saved = saveIssueReport(summary);
+            summary += "\n📝 문제 리포트 " + issues + "건 저장" + (saved != null ? " (" + saved + ")" : "")
+                    + " — 아래 '문제 리포트 공유'로 보내주세요";
+        }
+        return summary;
     }
 
     private Result doDevice(Config c, int mode, String name, boolean relaunch) {
@@ -224,6 +261,7 @@ public class MacroService extends AccessibilityService {
         if (card == null) return Result.fail("목록에서 기기를 찾지 못함");
 
         String status = collectText(card);
+        log("목록 카드: " + clean(status));
         boolean off = status.contains("전원 꺼짐");
         boolean usable = status.contains("사용 가능");
         if (mode == MODE_ON) {
@@ -247,6 +285,7 @@ public class MacroService extends AccessibilityService {
             return n;
         }, 12000);
         if (detail == null) return Result.fail("기기 화면이 열리지 않음");
+        log("기기 화면 열림 (" + detail.getViewIdResourceName() + ")");
 
         if (mode == MODE_ON) {
             sleep(pick(800, 400, 150));
@@ -507,6 +546,7 @@ public class MacroService extends AccessibilityService {
             String[] ts = pageTexts(play);
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
+            log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
             if (!st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
                 continue;
@@ -523,7 +563,12 @@ public class MacroService extends AccessibilityService {
                 return (!now.isEmpty() && !now.equals("마사지대기")) ? p : null;
             }, pick(5000, 3500, 2500));
             if (ok != null) started.add(label);
-            else unsure.add(label);
+            else {
+                unsure.add(label);
+                issues++;
+                log(label + " ▶ 누른 뒤 상태 변화 확인 안 됨");
+                snapshot(label + " ▶ 확인 안 됨");
+            }
             sleep(pick(1200, 600, 250));
         }
 
@@ -649,8 +694,13 @@ public class MacroService extends AccessibilityService {
     // ---------------------------------------------------------------- 세라젬 화면 조작
 
     private boolean launchTarget() {
+        log("세라젬 앱 새로 열기 — 이유: " + relaunchReason);
+        relaunchReason = "이유 미상";
         Intent i = getPackageManager().getLaunchIntentForPackage(Config.TARGET_PKG);
-        if (i == null) return false;
+        if (i == null) {
+            log("세라젬 IoT 앱이 설치되어 있지 않거나 열 수 없음");
+            return false;
+        }
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         try {
             startActivity(i);
@@ -921,6 +971,76 @@ public class MacroService extends AccessibilityService {
         anchor.getBoundsInScreen(a);
         int cy = a.bottom + a.height();
         return new Rect(a.centerX() - 10, cy - 10, a.centerX() + 10, cy + 10);
+    }
+
+    // ---------------------------------------------------------------- 문제 리포트
+
+    private void log(String msg) {
+        String t = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+        synchronized (diag) {
+            if (diag.length() < 400000) diag.append(t).append("  ").append(msg).append('\n');
+        }
+    }
+
+    /** 지금 화면에서 보이는 요소(ID·글자가 있는 것)만 간단히 기록. */
+    private void snapshot(String reason) {
+        StringBuilder sb = new StringBuilder();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        sb.append("    ┌ 화면 기록: ").append(reason);
+        if (root == null) {
+            sb.append(" — 화면을 읽지 못함\n");
+        } else {
+            sb.append(" — 앱 ").append(root.getPackageName()).append('\n');
+            int lines = 0;
+            for (AccessibilityNodeInfo n : allNodes(root)) {
+                if (!n.isVisibleToUser()) continue;
+                String id = n.getViewIdResourceName();
+                CharSequence tx = n.getText(), ds = n.getContentDescription();
+                if (id == null && tx == null && ds == null) continue;
+                Rect b = new Rect();
+                n.getBoundsInScreen(b);
+                sb.append("    │ ");
+                if (id != null) sb.append(id.substring(id.indexOf('/') + 1));
+                if (tx != null) sb.append(" \"").append(clean(tx.toString())).append('"');
+                if (ds != null) sb.append(" desc=\"").append(clean(ds.toString())).append('"');
+                if (n.isClickable()) sb.append(" [C]");
+                sb.append(' ').append(b.toShortString()).append('\n');
+                if (++lines >= 120) {
+                    sb.append("    │ …(이하 생략)\n");
+                    break;
+                }
+            }
+        }
+        sb.append("    └\n");
+        synchronized (diag) {
+            if (diag.length() < 400000) diag.append(sb);
+        }
+    }
+
+    private String saveIssueReport(String summary) {
+        String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+        String ver = "?";
+        try {
+            ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+        String ceragemVer = "?";
+        try {
+            ceragemVer = getPackageManager().getPackageInfo(Config.TARGET_PKG, 0).versionName;
+        } catch (Exception ignored) {
+        }
+        StringBuilder r = new StringBuilder();
+        r.append("# 세라젬 일괄조작 문제 리포트 ").append(ts).append('\n')
+                .append("일괄조작 앱 v").append(ver).append(" · 세라젬 IoT v").append(ceragemVer)
+                .append(" · ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(" · Android ").append(Build.VERSION.RELEASE).append("\n\n")
+                .append("## 결과\n").append(summary).append("\n## 진행 기록\n");
+        synchronized (diag) {
+            r.append(diag);
+        }
+        String text = r.toString();
+        MainActivity.lastIssueReport = text;
+        return saveToDownloads("ceragem_report_" + ts + ".txt", text);
     }
 
     // ---------------------------------------------------------------- 화면 분석(덤프)
