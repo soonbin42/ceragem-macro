@@ -16,6 +16,8 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.GridLayout;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -137,6 +139,30 @@ public class MainActivity extends Activity {
         root.addView(bigButton("전체 켜기", RED, v -> startMode(MacroService.MODE_ON)));
         root.addView(bigButton("전체 실행 ▶", Color.parseColor("#1F6F50"), v -> startMode(MacroService.MODE_RUN)));
         root.addView(bigButton("전체 끄기", Color.parseColor("#444444"), v -> startMode(MacroService.MODE_OFF)));
+
+        // 속도
+        root.addView(section("속도"));
+        LinearLayout speedCard = card(root);
+        RadioGroup rg = new RadioGroup(this);
+        rg.setOrientation(RadioGroup.HORIZONTAL);
+        String[] labels = {"안정", "보통", "빠름"};
+        for (int i = 0; i < 3; i++) {
+            final int sp = i;
+            RadioButton rb = new RadioButton(this);
+            rb.setText(labels[i]);
+            rb.setTextSize(16);
+            rb.setId(View.generateViewId());
+            rb.setChecked(cfg.speed == i);
+            rb.setOnClickListener(v -> {
+                cfg.speed = sp;
+                cfg.save(this);
+            });
+            RadioGroup.LayoutParams rlp = new RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            rb.setLayoutParams(rlp);
+            rg.addView(rb);
+        }
+        speedCard.addView(rg);
+        speedCard.addView(text("빠름에서 일부 기기가 안 켜지면 보통이나 안정으로 바꿔 보세요.", 13, MUTED, false));
 
         // 결과
         root.addView(section("최근 결과"));

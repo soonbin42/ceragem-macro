@@ -46,6 +46,13 @@ public class MacroService extends AccessibilityService {
     private volatile boolean running = false;
     private volatile boolean stopRequested = false;
     private Toast lastToast;
+    /** 0 안정 · 1 보통 · 2 빠름 */
+    private volatile int speed = 2;
+
+    /** 속도에 따라 대기 시간을 고른다. */
+    private long pick(long safe, long normal, long fast) {
+        return speed <= 0 ? safe : speed == 1 ? normal : fast;
+    }
 
     private interface Finder {
         AccessibilityNodeInfo find();
@@ -142,8 +149,10 @@ public class MacroService extends AccessibilityService {
 
     private String runAll(int mode) {
         Config c = Config.load(this);
+        speed = c.speed;
         List<Integer> devices = c.selectedList();
         if (devices.isEmpty()) return "선택된 기기가 없어요.";
+        long t0 = System.currentTimeMillis();
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
@@ -169,7 +178,9 @@ public class MacroService extends AccessibilityService {
                     .append(name).append(" — ").append(r.msg).append('\n');
         }
         String when = new SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(new Date());
-        return "[" + when + "] 전체 " + modeLabel(mode) + "\n"
+        long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
+        String[] sp = {"안정", "보통", "빠름"};
+        return "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
                 + lines;
     }
@@ -200,9 +211,9 @@ public class MacroService extends AccessibilityService {
         if (power == null) return Result.fail("기기 화면이 열리지 않음");
 
         if (mode == MODE_ON || mode == MODE_OFF) {
-            sleep(500);
+            sleep(pick(800, 400, 150));
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
-            sleep(1200);
+            sleep(pick(2000, 1000, 600));
             return Result.ok(mode == MODE_ON ? "켰음" : "껐음");
         }
         return runMassage(c);
@@ -255,17 +266,18 @@ public class MacroService extends AccessibilityService {
             return findTextStartingWith(head);
         }, fresh ? 25000 : 4000);
         if (any == null) return null;
-        sleep(fresh ? 1500 : 300); // 기기 상태 글자가 새로 고쳐질 시간
+        sleep(fresh ? 1500 : pick(600, 300, 100)); // 기기 상태 글자가 새로 고쳐질 시간
 
         for (int i = 0; i < 12 && !stopRequested; i++) {
             AccessibilityNodeInfo t = findExactText(name);
             if (t != null && t.isVisibleToUser()) {
+                if (speed >= 2) return containerOf(t);
                 sleep(400);
                 AccessibilityNodeInfo again = findExactText(name);
                 return containerOf(again != null ? again : t);
             }
             if (!scrollForward()) swipeListUp();
-            sleep(900);
+            sleep(pick(900, 700, 450));
         }
         AccessibilityNodeInfo t = findExactText(name);
         return t == null ? null : containerOf(t);
@@ -467,7 +479,7 @@ public class MacroService extends AccessibilityService {
             } catch (Exception ignored) {
             }
             if (n != null) return n;
-            sleep(400);
+            sleep(speed >= 2 ? 120 : 300);
         }
         return null;
     }
