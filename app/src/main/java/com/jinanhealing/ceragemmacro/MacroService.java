@@ -390,6 +390,11 @@ public class MacroService extends AccessibilityService {
             return st != null ? Result.ok("작동 시작") : Result.skip("▶ 누름 — 확인 안 됨");
         }
 
+        // 숫자만 적혀 있으면(예: "1, 2") 모드 이름과 상관없이 페이지 순서로 실행
+        boolean byPage = true;
+        for (String m : modes) if (!m.matches("\\d+")) byPage = false;
+        if (byPage) return runPages(c, modes);
+
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
         for (final String mode : modes) {
             if (stopRequested) break;
@@ -432,6 +437,91 @@ public class MacroService extends AccessibilityService {
         }
         if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
         return Result.ok(msg.toString());
+    }
+
+    /** 첫 번째 페이지(척추)부터 차례로, 적힌 번호의 페이지에서 ▶를 누른다. 모드 이름은 보지 않는다. */
+    private Result runPages(Config c, List<String> pageList) {
+        List<Integer> pages = new ArrayList<>();
+        for (String s : pageList) {
+            int n = Integer.parseInt(s);
+            if (n >= 1 && !pages.contains(n)) pages.add(n);
+        }
+        java.util.Collections.sort(pages);
+        String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
+
+        showModePages();
+        // 맨 앞 페이지로
+        for (int i = 0; i < 6 && !stopRequested; i++) {
+            AccessibilityNodeInfo pager = findById(ID_MODE_PAGES);
+            if (pager == null || !pager.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) break;
+            sleep(pick(900, 600, 400));
+        }
+
+        List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
+        int current = 1;
+        for (int target : pages) {
+            if (stopRequested) break;
+            showModePages();
+            while (current < target && !stopRequested) {
+                if (!scrollModePager(true)) swipeCarousel(true);
+                current++;
+                sleep(pick(1000, 700, 450));
+            }
+            sleep(pick(500, 250, 120));
+            AccessibilityNodeInfo play = findCenteredById(pid);
+            if (play == null) {
+                failed.add(target + "번 페이지 ▶ 못 찾음");
+                continue;
+            }
+            String[] ts = pageTexts(play);
+            String label = ts[0].isEmpty() ? target + "번" : ts[0];
+            String st = norm(ts[1]);
+            if (!st.isEmpty() && !st.equals("마사지대기")) {
+                already.add(label);
+                continue;
+            }
+            if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                failed.add(label + " ▶ 누르기 실패");
+                continue;
+            }
+            final String pidF = pid;
+            AccessibilityNodeInfo ok = waitFor(() -> {
+                AccessibilityNodeInfo p = findCenteredById(pidF);
+                if (p == null) return isMassageRunning() ? getRootInActiveWindow() : null;
+                String now = norm(pageTexts(p)[1]);
+                return (!now.isEmpty() && !now.equals("마사지대기")) ? p : null;
+            }, pick(5000, 3500, 2500));
+            if (ok != null) started.add(label);
+            else unsure.add(label);
+            sleep(pick(1200, 600, 250));
+        }
+
+        StringBuilder msg = new StringBuilder();
+        if (!started.isEmpty()) msg.append(String.join(" + ", started)).append(" 작동 시작");
+        if (!already.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", already)).append(" 이미 작동 중");
+        if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" ▶ 누름(확인 안 됨)");
+        if (!failed.isEmpty()) {
+            msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
+            return Result.fail(msg.toString());
+        }
+        if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
+        return Result.ok(msg.toString());
+    }
+
+    /** ▶ 버튼이 속한 페이지의 [모드 이름, 상태 글자]. */
+    private String[] pageTexts(AccessibilityNodeInfo play) {
+        String title = "", status = "";
+        AccessibilityNodeInfo page = play.getParent();
+        if (page != null) {
+            for (int i = 0; i < page.getChildCount(); i++) {
+                AccessibilityNodeInfo ch = page.getChild(i);
+                if (ch == null || ch.getText() == null) continue;
+                String id = ch.getViewIdResourceName();
+                if (ID_MODE_TITLE.equals(id)) title = ch.getText().toString();
+                else if (ID_MODE_STATUS.equals(id)) status = ch.getText().toString();
+            }
+        }
+        return new String[]{title, status};
     }
 
     /** 그 모드가 이미 돌아가는 중인지: 상태 글자가 있고 '마사지 대기'가 아니면 작동 중. */

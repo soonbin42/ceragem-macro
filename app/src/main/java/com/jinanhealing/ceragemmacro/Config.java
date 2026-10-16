@@ -16,7 +16,7 @@ public class Config {
 
     public int count = 10;
     public String prefix = "MASTER V9";
-    public String modeName = "릴렉스 모드, 음파 진동 마사지1";
+    public String modeName = "1, 2";
     public String playId = "";
     public String changeModeName = "릴렉스 모드";
     public String changeModeNo = "2";
@@ -32,8 +32,10 @@ public class Config {
         c.prefix = p.getString("prefix", c.prefix);
         c.modeName = p.getString("modeName", c.modeName);
         // v1.0.8: 실행은 릴렉스 모드 + 음파 진동 마사지1 두 가지를 차례로 켠다
-        if (p.getInt("cfgVer", 1) < 2 && "음파 진동 마사지1".equals(c.modeName.trim())) {
-            c.modeName = "릴렉스 모드, 음파 진동 마사지1";
+        // v1.0.13: 모드 이름 대신 페이지 순서(1=척추, 2=음파 진동)로 실행
+        if (p.getInt("cfgVer", 1) < 3) {
+            String m = c.modeName.replaceAll("\\s+", "");
+            if (m.equals("음파진동마사지1") || m.equals("릴렉스모드,음파진동마사지1")) c.modeName = "1, 2";
         }
         c.playId = p.getString("playId", "");
         c.changeModeName = p.getString("changeModeName", c.changeModeName);
@@ -70,7 +72,7 @@ public class Config {
                 .putString("changeModeNo", changeModeNo)
                 .putString("powerId", powerId)
                 .putInt("speed", speed)
-                .putInt("cfgVer", 2)
+                .putInt("cfgVer", 3)
                 .putString("selected", sb.toString())
                 .apply();
     }

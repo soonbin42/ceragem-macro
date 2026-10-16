@@ -200,7 +200,7 @@ public class MainActivity extends Activity {
         LinearLayout setCard = card(root);
         countEdit = field(setCard, "기기 수", String.valueOf(cfg.count), true);
         prefixEdit = field(setCard, "기기 이름 앞부분 (뒤에 01, 02… 자동)", cfg.prefix, false);
-        modeEdit = field(setCard, "실행할 모드 (쉼표로 여러 개, 적은 순서대로 ▶)", cfg.modeName, false);
+        modeEdit = field(setCard, "실행할 페이지 번호 (1=척추, 2=음파 진동 · 모드 이름으로 적어도 됨)", cfg.modeName, false);
         changeEdit = field(setCard, "모드 변경 버튼으로 바꿀 모드", cfg.changeModeName, false);
         changeNoEdit = field(setCard, "그 모드의 번호 (모드 창에서 몇 번인지, 릴렉스 = 2)", cfg.changeModeNo, true);
         playIdEdit = field(setCard, "▶ 버튼 ID (비워 두면 자동으로 찾음)", cfg.playId, false);
