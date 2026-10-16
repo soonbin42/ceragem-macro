@@ -275,13 +275,16 @@ public class MacroService extends AccessibilityService {
             return Result.fail("'" + mode + "' 모드를 찾지 못함");
         }
 
-        boolean pressed = false;
-        AccessibilityNodeInfo play = findPlay(c);
-        if (play != null) pressed = clickNode(play);
+        AccessibilityNodeInfo play = findPlayForMode(c, mode);
+        if (play == null) return Result.fail("▶ 버튼을 찾지 못함");
+        boolean pressed = play.performAction(AccessibilityNodeInfo.ACTION_CLICK);
         if (!pressed) {
-            Rect guess = playGuess();
-            if (guess == null) return Result.fail("▶ 버튼을 찾지 못함");
-            pressed = tap(guess.centerX(), guess.centerY());
+            Rect r = new Rect();
+            play.getBoundsInScreen(r);
+            Rect screen = screenRect();
+            if (screen != null && r.width() > 0 && r.left >= screen.left && r.right <= screen.right) {
+                pressed = tap(r.centerX(), r.centerY());
+            }
         }
         if (!pressed) return Result.fail("▶ 버튼을 누르지 못함");
 
@@ -289,6 +292,46 @@ public class MacroService extends AccessibilityService {
         // ▶를 눌렀다면 확인이 안 되더라도 다시 누르지 않는다(두 번 누르면 멈출 수 있음)
         if (started != null) return Result.ok((mode.isEmpty() ? "" : mode + " ") + "작동 시작");
         return Result.skip("▶ 누름 — 작동 여부 확인 안 됨");
+    }
+
+    /**
+     * 원하는 모드 이름이 적힌 페이지 안의 ▶ 버튼.
+     * 모드 페이지마다 ▶가 하나씩 있으므로, 같은 페이지의 제목(page_widget_03)으로 고른다.
+     */
+    private AccessibilityNodeInfo findPlayForMode(Config c, String mode) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
+        List<AccessibilityNodeInfo> plays = root.findAccessibilityNodeInfosByViewId(pid);
+        if (plays == null || plays.isEmpty()) return null;
+        String want = norm(mode);
+        AccessibilityNodeInfo visibleMatch = null, anyMatch = null, onlyVisible = null;
+        int visibleCount = 0;
+        for (AccessibilityNodeInfo p : plays) {
+            AccessibilityNodeInfo page = p.getParent();
+            String title = "";
+            if (page != null) {
+                for (int i = 0; i < page.getChildCount(); i++) {
+                    AccessibilityNodeInfo ch = page.getChild(i);
+                    if (ch != null && ID_MODE_TITLE.equals(ch.getViewIdResourceName())) {
+                        title = norm(ch.getText());
+                        break;
+                    }
+                }
+            }
+            if (p.isVisibleToUser()) {
+                visibleCount++;
+                onlyVisible = p;
+            }
+            if (!want.isEmpty() && title.equals(want)) {
+                if (p.isVisibleToUser() && visibleMatch == null) visibleMatch = p;
+                if (anyMatch == null) anyMatch = p;
+            }
+        }
+        if (visibleMatch != null) return visibleMatch;
+        if (anyMatch != null) return anyMatch;
+        if (want.isEmpty() || visibleCount == 1) return visibleCount == 1 ? onlyVisible : findCenteredById(pid);
+        return null;
     }
 
     /** "마사지 중" 또는 "척추 스캔중입니다." 같은 진행 화면이 보이면 작동 중. */
@@ -340,12 +383,22 @@ public class MacroService extends AccessibilityService {
 
     /** 기기 화면에서 뒤로 가서 목록이 다시 보이면 true. */
     private boolean returnToList(Config c) {
-        final String head = c.prefix.trim();
-        if (findById(c.powerId) == null && findTextStartingWith(head) != null) return true;
-        performGlobalAction(GLOBAL_ACTION_BACK);
-        AccessibilityNodeInfo list = waitFor(() ->
-                findById(c.powerId) == null ? findTextStartingWith(head) : null, 4000);
-        return list != null;
+        if (isListScreen(c)) return true;
+        for (int i = 0; i < 3 && !stopRequested; i++) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            AccessibilityNodeInfo list = waitFor(() -> isListScreen(c) ? getRootInActiveWindow() : null, 2000);
+            if (list != null) return true;
+        }
+        return false;
+    }
+
+    /** 기기 목록 화면인지: 기기 이름은 보이고, 기기 화면 버튼들은 없음. */
+    private boolean isListScreen(Config c) {
+        if (findTextStartingWith(c.prefix.trim()) == null) return false;
+        AccessibilityNodeInfo d = findById(ID_DETAIL_BACK);
+        if (d != null && d.isVisibleToUser()) return false;
+        d = findById(c.powerId);
+        return d == null || !d.isVisibleToUser();
     }
 
     private void dismissPopups() {
@@ -391,7 +444,15 @@ public class MacroService extends AccessibilityService {
             if (!n.isVisibleToUser() || r.width() <= 0 || r.left < screen.left) continue;
             if (Math.abs(r.centerX() - screen.centerX()) < screen.width() * 0.18) return true;
         }
-        return false;
+        // 좌표가 이상하게 나오는 경우: 화면에 보이는 모드 제목이 원하는 것 하나뿐이면 맞는 것으로 본다
+        int visible = 0;
+        boolean match = false;
+        for (AccessibilityNodeInfo n : cands) {
+            if (!ID_MODE_TITLE.equals(n.getViewIdResourceName()) || !n.isVisibleToUser()) continue;
+            visible++;
+            if (norm(n.getText()).equals(want)) match = true;
+        }
+        return visible == 1 && match;
     }
 
     /** 모드 넘기기 화면을 접근성 스크롤로 한 칸 넘긴다. */
