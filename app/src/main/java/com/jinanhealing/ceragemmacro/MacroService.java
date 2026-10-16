@@ -266,32 +266,104 @@ public class MacroService extends AccessibilityService {
         return runMassage(c);
     }
 
+    private static final String ID_MODE_STATUS = "kr.co.ceragem.iot:id/page_widget_04";
+
+    /** 설정한 모드들(쉼표 구분)을 순서대로 넘겨 가며 각각 ▶를 누른다. 예: 릴렉스 모드 → 음파 진동 마사지1 */
     private Result runMassage(Config c) {
         sleep(pick(1500, 1000, 700));
-        if (isMassageRunning()) return Result.skip("이미 작동 중");
-
-        String mode = c.modeName == null ? "" : c.modeName.trim();
-        if (!mode.isEmpty() && !selectMode(mode)) {
-            return Result.fail("'" + mode + "' 모드를 찾지 못함");
+        List<String> modes = new ArrayList<>();
+        if (c.modeName != null) {
+            for (String m : c.modeName.split("[,，]")) if (!m.trim().isEmpty()) modes.add(m.trim());
+        }
+        if (modes.isEmpty()) {
+            if (isMassageRunning()) return Result.skip("이미 작동 중");
+            AccessibilityNodeInfo play = findPlayForMode(c, "");
+            if (play == null) return Result.fail("▶ 버튼을 찾지 못함");
+            if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return Result.fail("▶ 버튼을 누르지 못함");
+            AccessibilityNodeInfo st = waitFor(() -> isMassageRunning() ? getRootInActiveWindow() : null, 7000);
+            return st != null ? Result.ok("작동 시작") : Result.skip("▶ 누름 — 확인 안 됨");
         }
 
-        AccessibilityNodeInfo play = findPlayForMode(c, mode);
-        if (play == null) return Result.fail("▶ 버튼을 찾지 못함");
-        boolean pressed = play.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-        if (!pressed) {
-            Rect r = new Rect();
-            play.getBoundsInScreen(r);
-            Rect screen = screenRect();
-            if (screen != null && r.width() > 0 && r.left >= screen.left && r.right <= screen.right) {
-                pressed = tap(r.centerX(), r.centerY());
+        List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
+        for (final String mode : modes) {
+            if (stopRequested) break;
+            showModePages();
+            if (!selectMode(mode)) {
+                failed.add(mode + " 못 찾음");
+                continue;
+            }
+            sleep(pick(500, 300, 200));
+            if ("마사지중".equals(norm(modeStatus(mode)))) {
+                already.add(mode);
+                continue;
+            }
+            AccessibilityNodeInfo play = findPlayForMode(c, mode);
+            if (play == null) {
+                failed.add(mode + " ▶ 못 찾음");
+                continue;
+            }
+            final boolean wasRunning = isMassageRunning();
+            if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                failed.add(mode + " ▶ 누르기 실패");
+                continue;
+            }
+            AccessibilityNodeInfo ok = waitFor(() ->
+                    ("마사지중".equals(norm(modeStatus(mode))) || (!wasRunning && isMassageRunning()))
+                            ? getRootInActiveWindow() : null, 6000);
+            // 눌렀으면 확인이 안 되더라도 다시 누르지 않는다(두 번 누르면 멈춤)
+            if (ok != null) started.add(mode);
+            else unsure.add(mode);
+            sleep(pick(1500, 1000, 700));
+        }
+
+        StringBuilder msg = new StringBuilder();
+        if (!started.isEmpty()) msg.append(String.join(" + ", started)).append(" 작동 시작");
+        if (!already.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", already)).append(" 이미 작동 중");
+        if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" ▶ 누름(확인 안 됨)");
+        if (!failed.isEmpty()) {
+            msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
+            // 아무것도 누르지 못했을 때만 실패로 처리(다시 시도해도 이미 켠 모드는 건너뜀)
+            return Result.fail(msg.toString());
+        }
+        if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
+        return Result.ok(msg.toString());
+    }
+
+    /** 특정 모드 페이지의 상태 글자(마사지 대기 / 마사지 중). */
+    private String modeStatus(String mode) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "";
+        List<AccessibilityNodeInfo> titles = root.findAccessibilityNodeInfosByViewId(ID_MODE_TITLE);
+        if (titles == null) return "";
+        String want = norm(mode);
+        String fallback = "";
+        for (AccessibilityNodeInfo t : titles) {
+            if (!norm(t.getText()).equals(want)) continue;
+            AccessibilityNodeInfo page = t.getParent();
+            if (page == null) continue;
+            for (int i = 0; i < page.getChildCount(); i++) {
+                AccessibilityNodeInfo ch = page.getChild(i);
+                if (ch != null && ID_MODE_STATUS.equals(ch.getViewIdResourceName()) && ch.getText() != null) {
+                    if (t.isVisibleToUser()) return ch.getText().toString();
+                    if (fallback.isEmpty()) fallback = ch.getText().toString();
+                }
             }
         }
-        if (!pressed) return Result.fail("▶ 버튼을 누르지 못함");
+        return fallback;
+    }
 
-        AccessibilityNodeInfo started = waitFor(() -> isMassageRunning() ? getRootInActiveWindow() : null, 7000);
-        // ▶를 눌렀다면 확인이 안 되더라도 다시 누르지 않는다(두 번 누르면 멈출 수 있음)
-        if (started != null) return Result.ok((mode.isEmpty() ? "" : mode + " ") + "작동 시작");
-        return Result.skip("▶ 누름 — 작동 여부 확인 안 됨");
+    /** "척추 스캔중" 같은 진행 화면이 앞에 있으면 모드 넘기기 화면으로 되돌린다. */
+    private void showModePages() {
+        AccessibilityNodeInfo prog = findById(ID_PROGRESS);
+        if (prog == null || !prog.isVisibleToUser()) return;
+        AccessibilityNodeInfo pages = findById(ID_DETAIL_PAGES);
+        if (pages == null) return;
+        pages.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+        waitFor(() -> {
+            AccessibilityNodeInfo p = findById(ID_PROGRESS);
+            return (p == null || !p.isVisibleToUser()) ? getRootInActiveWindow() : null;
+        }, 2500);
+        sleep(pick(800, 500, 300));
     }
 
     /**

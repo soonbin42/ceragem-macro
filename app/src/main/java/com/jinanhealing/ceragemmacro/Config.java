@@ -16,7 +16,7 @@ public class Config {
 
     public int count = 10;
     public String prefix = "MASTER V9";
-    public String modeName = "음파 진동 마사지1";
+    public String modeName = "릴렉스 모드, 음파 진동 마사지1";
     public String playId = "";
     public String powerId = DEFAULT_POWER_ID;
     /** 0 안정 · 1 보통 · 2 빠름 */
@@ -29,6 +29,10 @@ public class Config {
         c.count = Math.max(1, Math.min(30, p.getInt("count", 10)));
         c.prefix = p.getString("prefix", c.prefix);
         c.modeName = p.getString("modeName", c.modeName);
+        // v1.0.8: 실행은 릴렉스 모드 + 음파 진동 마사지1 두 가지를 차례로 켠다
+        if (p.getInt("cfgVer", 1) < 2 && "음파 진동 마사지1".equals(c.modeName.trim())) {
+            c.modeName = "릴렉스 모드, 음파 진동 마사지1";
+        }
         c.playId = p.getString("playId", "");
         c.powerId = p.getString("powerId", DEFAULT_POWER_ID);
         c.speed = Math.max(0, Math.min(2, p.getInt("speed", 2)));
@@ -60,6 +64,7 @@ public class Config {
                 .putString("playId", playId)
                 .putString("powerId", powerId)
                 .putInt("speed", speed)
+                .putInt("cfgVer", 2)
                 .putString("selected", sb.toString())
                 .apply();
     }
