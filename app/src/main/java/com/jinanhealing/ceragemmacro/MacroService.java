@@ -292,8 +292,8 @@ public class MacroService extends AccessibilityService {
                 failed.add(mode + " 못 찾음");
                 continue;
             }
-            sleep(pick(500, 300, 200));
-            if ("마사지중".equals(norm(modeStatus(mode)))) {
+            sleep(pick(500, 250, 120));
+            if (isModeActive(mode)) {
                 already.add(mode);
                 continue;
             }
@@ -302,18 +302,17 @@ public class MacroService extends AccessibilityService {
                 failed.add(mode + " ▶ 못 찾음");
                 continue;
             }
-            final boolean wasRunning = isMassageRunning();
             if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 failed.add(mode + " ▶ 누르기 실패");
                 continue;
             }
-            AccessibilityNodeInfo ok = waitFor(() ->
-                    ("마사지중".equals(norm(modeStatus(mode))) || (!wasRunning && isMassageRunning()))
-                            ? getRootInActiveWindow() : null, 6000);
+            // '마사지 대기'에서 다른 글자(스캔 대기 · 척추 스캔중 · 마사지 중)로 바뀌면 시작된 것
+            AccessibilityNodeInfo ok = waitFor(() -> isModeActive(mode) ? getRootInActiveWindow() : null,
+                    pick(5000, 3500, 2500));
             // 눌렀으면 확인이 안 되더라도 다시 누르지 않는다(두 번 누르면 멈춤)
             if (ok != null) started.add(mode);
             else unsure.add(mode);
-            sleep(pick(1500, 1000, 700));
+            sleep(pick(1200, 600, 250));
         }
 
         StringBuilder msg = new StringBuilder();
@@ -329,7 +328,13 @@ public class MacroService extends AccessibilityService {
         return Result.ok(msg.toString());
     }
 
-    /** 특정 모드 페이지의 상태 글자(마사지 대기 / 마사지 중). */
+    /** 그 모드가 이미 돌아가는 중인지: 상태 글자가 있고 '마사지 대기'가 아니면 작동 중. */
+    private boolean isModeActive(String mode) {
+        String st = norm(modeStatus(mode));
+        return !st.isEmpty() && !st.equals("마사지대기");
+    }
+
+    /** 특정 모드 페이지의 상태 글자(마사지 대기 / 스캔 대기 / 척추 스캔중 / 마사지 중). */
     private String modeStatus(String mode) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return "";
@@ -492,7 +497,9 @@ public class MacroService extends AccessibilityService {
                 if (isModeCentered(mode)) return true;
                 if (i == tries) break;
                 if (!scrollModePager(dir == 0)) swipeCarousel(dir == 0);
-                sleep(pick(1300, 1000, 800));
+                // 넘어가는 즉시 다음 단계로(고정 대기 대신 확인될 때까지만 기다림)
+                sleep(150);
+                waitFor(() -> isModeCentered(mode) ? getRootInActiveWindow() : null, pick(1300, 1000, 800));
             }
         }
         return isModeCentered(mode);
