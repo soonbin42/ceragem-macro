@@ -58,6 +58,7 @@ public class MacroService extends AccessibilityService {
     private Toast lastToast;
     /** 0 안정 · 1 보통 · 2 빠름 */
     private volatile int speed = 2;
+    private long lastVolDown = 0;
 
     /** 속도에 따라 대기 시간을 고른다. */
     private long pick(long safe, long normal, long fast) {
@@ -72,10 +73,17 @@ public class MacroService extends AccessibilityService {
         static final int OK = 0, SKIP = 1, FAIL = 2;
         final int kind;
         final String msg;
+        /** ▶처럼 두 번 누르면 반대로 동작하는 버튼을 이미 눌렀으면 자동 재시도하지 않는다. */
+        boolean noRetry = false;
 
         Result(int kind, String msg) {
             this.kind = kind;
             this.msg = msg;
+        }
+
+        Result noRetry() {
+            noRetry = true;
+            return this;
         }
 
         static Result ok(String m) { return new Result(OK, m); }
@@ -115,9 +123,15 @@ public class MacroService extends AccessibilityService {
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         if (running && event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                stopRequested = true;
-                toast("중지합니다 — 지금 기기까지만 하고 멈춰요");
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                long now = System.currentTimeMillis();
+                if (now - lastVolDown < 1500) {
+                    stopRequested = true;
+                    toast("중지합니다 — 지금 기기까지만 하고 멈춰요");
+                } else {
+                    toast("한 번 더 누르면 중지해요");
+                }
+                lastVolDown = now;
             }
             return true;
         }
@@ -182,7 +196,7 @@ public class MacroService extends AccessibilityService {
             String name = c.deviceName(devices.get(k));
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
             Result r = doDevice(c, mode, name, relaunch);
-            if (r.kind == Result.FAIL && !stopRequested) {
+            if (r.kind == Result.FAIL && !r.noRetry && !stopRequested) {
                 toast(name + " 다시 시도");
                 r = doDevice(c, mode, name, true);
             }
@@ -311,9 +325,9 @@ public class MacroService extends AccessibilityService {
 
         // 목록에서 릴렉스 고르기
         AccessibilityNodeInfo item = waitFor(() -> {
-            AccessibilityNodeInfo n = visibleText(target);
-            if (n == null && !shortName.isEmpty()) n = visibleText(shortName);
-            if (n == null && !shortName.isEmpty()) n = visibleTextContaining(shortName);
+            AccessibilityNodeInfo n = popupItem(target, false);
+            if (n == null && !shortName.isEmpty()) n = popupItem(shortName, false);
+            if (n == null && !shortName.isEmpty()) n = popupItem(shortName, true);
             if (n == null && !no.isEmpty()) n = visibleNumberItem(no);
             return n;
         }, 4000);
@@ -359,6 +373,23 @@ public class MacroService extends AccessibilityService {
             String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName();
             if (id.contains("open_body_parts")) continue;
             return n;
+        }
+        return null;
+    }
+
+    /** 모드 선택 창의 항목. 뒤 화면의 모드 제목·머리글·안내 말풍선은 제외. */
+    private AccessibilityNodeInfo popupItem(String text, boolean contains) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(text);
+        if (found == null) return null;
+        String want = norm(text);
+        for (AccessibilityNodeInfo n : found) {
+            if (!n.isVisibleToUser()) continue;
+            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName();
+            if (id.equals(ID_MODE_TITLE) || id.endsWith(":id/screen_widget_01") || id.endsWith(":id/tv_ai_message")) continue;
+            String t = norm(n.getText());
+            if (contains ? t.contains(want) : t.equals(want)) return n;
         }
         return null;
     }
@@ -432,8 +463,8 @@ public class MacroService extends AccessibilityService {
         if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" ▶ 누름(확인 안 됨)");
         if (!failed.isEmpty()) {
             msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
-            // 아무것도 누르지 못했을 때만 실패로 처리(다시 시도해도 이미 켠 모드는 건너뜀)
-            return Result.fail(msg.toString());
+            Result f = Result.fail(msg.toString());
+            return (started.isEmpty() && unsure.isEmpty()) ? f : f.noRetry();
         }
         if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
         return Result.ok(msg.toString());
@@ -502,7 +533,8 @@ public class MacroService extends AccessibilityService {
         if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" ▶ 누름(확인 안 됨)");
         if (!failed.isEmpty()) {
             msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
-            return Result.fail(msg.toString());
+            Result f = Result.fail(msg.toString());
+            return (started.isEmpty() && unsure.isEmpty()) ? f : f.noRetry();
         }
         if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
         return Result.ok(msg.toString());
@@ -756,6 +788,18 @@ public class MacroService extends AccessibilityService {
                 bestD = d;
                 best = n;
             }
+        }
+        if (best == null) {
+            // 좌표가 이상하게 나오는 화면: 보이는 것이 딱 하나면 그것을 쓴다
+            AccessibilityNodeInfo only = null;
+            int cnt = 0;
+            for (AccessibilityNodeInfo n : found) {
+                if (n.isVisibleToUser()) {
+                    cnt++;
+                    only = n;
+                }
+            }
+            if (cnt == 1) best = only;
         }
         return best;
     }

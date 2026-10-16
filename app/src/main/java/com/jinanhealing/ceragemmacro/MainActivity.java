@@ -90,7 +90,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (svc.isRunning()) {
-            Toast.makeText(this, "이미 실행 중이에요 (볼륨 아래 버튼 = 중지)", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "이미 실행 중이에요 (볼륨 아래 두 번 = 중지)", Toast.LENGTH_SHORT).show();
             return;
         }
         if (Config.load(this).selectedList().isEmpty()) {
@@ -123,7 +123,7 @@ public class MainActivity extends Activity {
 
         TextView title = text("세라젬 일괄조작", 26, INK, true);
         root.addView(title);
-        TextView sub = text("선택한 기기를 세라젬 IoT 앱에서 차례로 대신 눌러 줍니다. 실행 중에는 폰을 만지지 마세요. 볼륨 아래 버튼을 누르면 멈춥니다.", 14, MUTED, false);
+        TextView sub = text("선택한 기기를 세라젬 IoT 앱에서 차례로 대신 눌러 줍니다. 실행 중에는 폰을 만지지 마세요. 볼륨 아래 버튼을 두 번 누르면 멈춥니다.", 14, MUTED, false);
         sub.setPadding(0, dp(4), 0, dp(14));
         root.addView(sub);
 
