@@ -47,6 +47,8 @@ public class MacroService extends AccessibilityService {
     private static final String ID_MODE_PAGES = "kr.co.ceragem.iot:id/summary_graph_pages";
     private static final String ID_MODE_TITLE = "kr.co.ceragem.iot:id/page_widget_03";
     private static final String ID_PROGRESS = "kr.co.ceragem.iot:id/massage_progress_message";
+    private static final String ID_DETAIL_PAGES = "kr.co.ceragem.iot:id/master_v_pages";
+    private static final String ID_DETAIL_BACK = "kr.co.ceragem.iot:id/do_back";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean running = false;
@@ -206,21 +208,30 @@ public class MacroService extends AccessibilityService {
             if (!off) return Result.fail("상태 확인 불가 (" + clean(status) + ")");
         } else if (mode == MODE_OFF) {
             if (off) return Result.skip("이미 꺼져 있음");
-            if (!usable) return Result.fail("상태 확인 불가 (" + clean(status) + ")");
         } else {
             if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기");
         }
 
         if (!clickNode(card)) return Result.fail("기기 카드를 누르지 못함");
 
-        AccessibilityNodeInfo power = waitFor(() -> findById(c.powerId), 12000);
-        if (power == null) return Result.fail("기기 화면이 열리지 않음");
+        // 기기 화면이 열렸는지: 꺼진 화면(가운데 전원) 또는 켜진 화면(오른쪽 위 전원·▶·뒤로) 중 하나
+        AccessibilityNodeInfo detail = waitFor(() -> {
+            AccessibilityNodeInfo n = findById(c.powerId);
+            if (n == null) n = findById(ID_POWER_OFF);
+            if (n == null) n = findById(ID_PLAY);
+            if (n == null) n = findById(ID_DETAIL_PAGES);
+            if (n == null) n = findById(ID_DETAIL_BACK);
+            return n;
+        }, 12000);
+        if (detail == null) return Result.fail("기기 화면이 열리지 않음");
 
         if (mode == MODE_ON) {
             sleep(pick(800, 400, 150));
-            if (visibleText("전원을 켜 주세요") == null && visibleText("전원을 켜주세요") == null) {
+            AccessibilityNodeInfo power = findById(c.powerId);
+            if (power == null && visibleText("전원을 켜 주세요") == null && visibleText("전원을 켜주세요") == null) {
                 return Result.skip("이미 켜져 있음");
             }
+            if (power == null) return Result.fail("가운데 전원 버튼을 찾지 못함");
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
             sleep(pick(2000, 1000, 600));
             return Result.ok("켰음");
@@ -231,8 +242,21 @@ public class MacroService extends AccessibilityService {
                 return Result.skip("이미 꺼져 있음");
             }
             AccessibilityNodeInfo offBtn = findOffButton();
+            if (offBtn != null && !offBtn.isVisibleToUser()) {
+                // 마사지 진행 화면이 앞에 있으면 첫 화면으로 되돌린 뒤 다시 찾는다
+                AccessibilityNodeInfo pages = findById(ID_DETAIL_PAGES);
+                if (pages != null) {
+                    pages.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                    sleep(pick(1200, 900, 700));
+                    AccessibilityNodeInfo again = findOffButton();
+                    if (again != null) offBtn = again;
+                }
+            }
             if (offBtn == null) return Result.fail("오른쪽 위 전원 버튼을 찾지 못함");
-            if (!clickNode(offBtn)) return Result.fail("전원 버튼을 누르지 못함");
+            if (!offBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(offBtn)) {
+                return Result.fail("전원 버튼을 누르지 못함");
+            }
+            confirmDialogIfAny();
             AccessibilityNodeInfo done = waitFor(() -> {
                 AccessibilityNodeInfo a = visibleText("전원을 켜 주세요");
                 return a != null ? a : visibleText("전원을 켜주세요");
@@ -414,6 +438,23 @@ public class MacroService extends AccessibilityService {
         int right = (int) (screen.left + screen.width() * 0.82);
         if (toNext) swipe(right, y, left, y, 300);
         else swipe(left, y, right, y, 300);
+    }
+
+    /** 전원 끄기 확인 창이 뜨면 확인 쪽 버튼을 누른다. */
+    private void confirmDialogIfAny() {
+        String[] labels = {"전원 끄기", "끄기", "확인", "예", "네"};
+        long end = System.currentTimeMillis() + pick(2000, 1500, 1200);
+        while (System.currentTimeMillis() < end && !stopRequested) {
+            for (String l : labels) {
+                AccessibilityNodeInfo n = visibleText(l);
+                if (n != null) {
+                    clickNode(n);
+                    sleep(300);
+                    return;
+                }
+            }
+            sleep(150);
+        }
     }
 
     /** 원 안의 "마사지 대기" 글자. ▶ 버튼 위치와 모드 넘기기 높이의 기준점. */
