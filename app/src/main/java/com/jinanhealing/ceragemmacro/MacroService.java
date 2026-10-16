@@ -40,6 +40,7 @@ public class MacroService extends AccessibilityService {
     public static final int MODE_RUN = 2;
     public static final int MODE_OFF = 3;
     public static final int MODE_ON_RUN = 4;
+    public static final int MODE_CHANGE = 5;
 
     public static volatile MacroService instance;
 
@@ -133,6 +134,7 @@ public class MacroService extends AccessibilityService {
             case MODE_RUN: return "실행";
             case MODE_OFF: return "끄기";
             case MODE_ON_RUN: return "켜고 바로 실행";
+            case MODE_CHANGE: return "모드 변경";
             default: return "?";
         }
     }
@@ -270,7 +272,84 @@ public class MacroService extends AccessibilityService {
             }, pick(5000, 4000, 3000));
             return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
+        if (mode == MODE_CHANGE) return changeSpineMode(c);
         return runMassage(c);
+    }
+
+    private static final String ID_MODES_BTN = "kr.co.ceragem.iot:id/open_body_parts_modes";
+    private static final String ID_SPINE_MODES_BTN = "kr.co.ceragem.iot:id/open_body_parts_spine_modes";
+
+    /** 척추(첫 번째) 페이지의 모드를 설정한 모드(기본: 릴렉스 모드)로 바꾼다. ▶는 누르지 않는다. */
+    private Result changeSpineMode(Config c) {
+        final String target = c.changeModeName == null || c.changeModeName.trim().isEmpty()
+                ? "릴렉스 모드" : c.changeModeName.trim();
+        final String shortName = target.replace("모드", "").trim();   // "릴렉스"
+        sleep(pick(1200, 800, 500));
+        showModePages();
+
+        // 모드 넘기기 화면을 맨 앞(척추 페이지)으로
+        AccessibilityNodeInfo pager = findById(ID_MODE_PAGES);
+        if (pager != null) {
+            for (int i = 0; i < 4 && pager.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD); i++) {
+                sleep(pick(900, 700, 500));
+                pager = findById(ID_MODE_PAGES);
+                if (pager == null) break;
+            }
+        }
+        if (isModeCentered(target)) return Result.skip("이미 " + target);
+
+        // 아래쪽 '모드' 버튼
+        AccessibilityNodeInfo btn = findCenteredOrVisible(ID_MODES_BTN);
+        if (btn == null) btn = findCenteredOrVisible(ID_SPINE_MODES_BTN);
+        if (btn == null) return Result.fail("모드 버튼을 찾지 못함");
+        if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) {
+            return Result.fail("모드 버튼을 누르지 못함");
+        }
+
+        // 목록에서 릴렉스 고르기
+        AccessibilityNodeInfo item = waitFor(() -> {
+            AccessibilityNodeInfo n = visibleText(target);
+            if (n == null && !shortName.isEmpty()) n = visibleText(shortName);
+            if (n == null && !shortName.isEmpty()) n = visibleTextContaining(shortName);
+            return n;
+        }, 4000);
+        if (item == null) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            return Result.fail("모드 목록에서 '" + shortName + "'을 찾지 못함");
+        }
+        clickNode(item);
+        sleep(pick(600, 400, 250));
+        String[] confirm = {"확인", "적용", "선택", "완료", "변경"};
+        for (String l : confirm) {
+            AccessibilityNodeInfo n = visibleText(l);
+            if (n != null) {
+                clickNode(n);
+                break;
+            }
+        }
+        AccessibilityNodeInfo done = waitFor(() -> isModeCentered(target) ? getRootInActiveWindow() : null, 4000);
+        if (done != null) return Result.ok(target + "로 변경");
+        return Result.skip(shortName + " 선택함 — 변경 확인 안 됨");
+    }
+
+    private AccessibilityNodeInfo findCenteredOrVisible(String id) {
+        AccessibilityNodeInfo n = findCenteredById(id);
+        if (n != null) return n;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByViewId(id);
+        if (found == null) return null;
+        for (AccessibilityNodeInfo f : found) if (f.isVisibleToUser()) return f;
+        return null;
+    }
+
+    private AccessibilityNodeInfo visibleTextContaining(String part) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(part);
+        if (found == null) return null;
+        for (AccessibilityNodeInfo n : found) if (n.isVisibleToUser()) return n;
+        return null;
     }
 
     private static final String ID_MODE_STATUS = "kr.co.ceragem.iot:id/page_widget_04";

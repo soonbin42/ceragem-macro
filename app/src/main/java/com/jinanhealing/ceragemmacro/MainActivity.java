@@ -40,7 +40,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private Button a11yButton;
     private GridLayout grid;
-    private EditText countEdit, prefixEdit, modeEdit, playIdEdit;
+    private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit;
     private TextView reportView;
     private Button shareDumpButton;
     private Config cfg;
@@ -144,7 +144,7 @@ public class MainActivity extends Activity {
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.addView(squareButton("전체\n끄기", "■", Color.parseColor("#444444"), v -> startMode(MacroService.MODE_OFF)));
-        row2.addView(squareButton("켜고\n바로 실행", "⚡▶", Color.parseColor("#B5651D"), v -> startMode(MacroService.MODE_ON_RUN)));
+        row2.addView(squareButton("모드\n변경", "↻", Color.parseColor("#6A4C93"), v -> startMode(MacroService.MODE_CHANGE)));
         root.addView(row2);
 
         // 대상 기기
@@ -201,6 +201,7 @@ public class MainActivity extends Activity {
         countEdit = field(setCard, "기기 수", String.valueOf(cfg.count), true);
         prefixEdit = field(setCard, "기기 이름 앞부분 (뒤에 01, 02… 자동)", cfg.prefix, false);
         modeEdit = field(setCard, "실행할 모드 (쉼표로 여러 개, 적은 순서대로 ▶)", cfg.modeName, false);
+        changeEdit = field(setCard, "모드 변경 버튼으로 바꿀 모드", cfg.changeModeName, false);
         playIdEdit = field(setCard, "▶ 버튼 ID (비워 두면 자동으로 찾음)", cfg.playId, false);
         Button save = smallButton("설정 저장");
         save.setOnClickListener(v -> saveFromUi(true));
@@ -281,6 +282,8 @@ public class MainActivity extends Activity {
         if (!p.isEmpty()) cfg.prefix = p;
         cfg.modeName = modeEdit.getText().toString().trim();
         cfg.playId = playIdEdit.getText().toString().trim();
+        String cm = changeEdit.getText().toString().trim();
+        cfg.changeModeName = cm.isEmpty() ? "릴렉스 모드" : cm;
         cfg.save(this);
         rebuildGrid();
         countEdit.setText(String.valueOf(cfg.count));
