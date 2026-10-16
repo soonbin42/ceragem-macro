@@ -40,7 +40,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private Button a11yButton;
     private GridLayout grid;
-    private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit;
+    private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit, changeNoEdit;
     private TextView reportView;
     private Button shareDumpButton;
     private Config cfg;
@@ -202,6 +202,7 @@ public class MainActivity extends Activity {
         prefixEdit = field(setCard, "기기 이름 앞부분 (뒤에 01, 02… 자동)", cfg.prefix, false);
         modeEdit = field(setCard, "실행할 모드 (쉼표로 여러 개, 적은 순서대로 ▶)", cfg.modeName, false);
         changeEdit = field(setCard, "모드 변경 버튼으로 바꿀 모드", cfg.changeModeName, false);
+        changeNoEdit = field(setCard, "그 모드의 번호 (모드 창에서 몇 번인지, 릴렉스 = 2)", cfg.changeModeNo, true);
         playIdEdit = field(setCard, "▶ 버튼 ID (비워 두면 자동으로 찾음)", cfg.playId, false);
         Button save = smallButton("설정 저장");
         save.setOnClickListener(v -> saveFromUi(true));
@@ -284,6 +285,7 @@ public class MainActivity extends Activity {
         cfg.playId = playIdEdit.getText().toString().trim();
         String cm = changeEdit.getText().toString().trim();
         cfg.changeModeName = cm.isEmpty() ? "릴렉스 모드" : cm;
+        cfg.changeModeNo = changeNoEdit.getText().toString().trim();
         cfg.save(this);
         rebuildGrid();
         countEdit.setText(String.valueOf(cfg.count));

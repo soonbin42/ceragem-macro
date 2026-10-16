@@ -19,6 +19,7 @@ public class Config {
     public String modeName = "릴렉스 모드, 음파 진동 마사지1";
     public String playId = "";
     public String changeModeName = "릴렉스 모드";
+    public String changeModeNo = "2";
     public String powerId = DEFAULT_POWER_ID;
     /** 0 안정 · 1 보통 · 2 빠름 */
     public int speed = 2;
@@ -36,6 +37,7 @@ public class Config {
         }
         c.playId = p.getString("playId", "");
         c.changeModeName = p.getString("changeModeName", c.changeModeName);
+        c.changeModeNo = p.getString("changeModeNo", c.changeModeNo);
         c.powerId = p.getString("powerId", DEFAULT_POWER_ID);
         c.speed = Math.max(0, Math.min(2, p.getInt("speed", 2)));
         String sel = p.getString("selected", null);
@@ -65,6 +67,7 @@ public class Config {
                 .putString("modeName", modeName)
                 .putString("playId", playId)
                 .putString("changeModeName", changeModeName)
+                .putString("changeModeNo", changeModeNo)
                 .putString("powerId", powerId)
                 .putInt("speed", speed)
                 .putInt("cfgVer", 2)

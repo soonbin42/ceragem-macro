@@ -296,12 +296,15 @@ public class MacroService extends AccessibilityService {
                 if (pager == null) break;
             }
         }
-        if (isModeCentered(target)) return Result.skip("이미 " + target);
+        final String no = c.changeModeNo == null ? "" : c.changeModeNo.trim();
 
-        // 아래쪽 '모드' 버튼
+        // 아래쪽 '모드' 버튼 (숫자가 현재 모드 번호, 릴렉스 = 2)
         AccessibilityNodeInfo btn = findCenteredOrVisible(ID_MODES_BTN);
         if (btn == null) btn = findCenteredOrVisible(ID_SPINE_MODES_BTN);
         if (btn == null) return Result.fail("모드 버튼을 찾지 못함");
+        if ((!no.isEmpty() && no.equals(norm(btn.getText()))) || isModeCentered(target)) {
+            return Result.skip("이미 " + target + (no.isEmpty() ? "" : " (모드 " + no + ")"));
+        }
         if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) {
             return Result.fail("모드 버튼을 누르지 못함");
         }
@@ -311,6 +314,7 @@ public class MacroService extends AccessibilityService {
             AccessibilityNodeInfo n = visibleText(target);
             if (n == null && !shortName.isEmpty()) n = visibleText(shortName);
             if (n == null && !shortName.isEmpty()) n = visibleTextContaining(shortName);
+            if (n == null && !no.isEmpty()) n = visibleNumberItem(no);
             return n;
         }, 4000);
         if (item == null) {
@@ -327,7 +331,12 @@ public class MacroService extends AccessibilityService {
                 break;
             }
         }
-        AccessibilityNodeInfo done = waitFor(() -> isModeCentered(target) ? getRootInActiveWindow() : null, 4000);
+        AccessibilityNodeInfo done = waitFor(() -> {
+            if (isModeCentered(target)) return getRootInActiveWindow();
+            AccessibilityNodeInfo b = findCenteredOrVisible(ID_MODES_BTN);
+            if (b == null) b = findCenteredOrVisible(ID_SPINE_MODES_BTN);
+            return (b != null && !no.isEmpty() && no.equals(norm(b.getText()))) ? b : null;
+        }, 4000);
         if (done != null) return Result.ok(target + "로 변경");
         return Result.skip(shortName + " 선택함 — 변경 확인 안 됨");
     }
@@ -340,6 +349,17 @@ public class MacroService extends AccessibilityService {
         List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByViewId(id);
         if (found == null) return null;
         for (AccessibilityNodeInfo f : found) if (f.isVisibleToUser()) return f;
+        return null;
+    }
+
+    /** 모드 선택 창에서 번호(예: "2")가 적힌 항목. 아래쪽 모드·강도·온도 버튼은 제외. */
+    private AccessibilityNodeInfo visibleNumberItem(String no) {
+        for (AccessibilityNodeInfo n : findAllExactText(no)) {
+            if (!n.isVisibleToUser()) continue;
+            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName();
+            if (id.contains("open_body_parts")) continue;
+            return n;
+        }
         return null;
     }
 
