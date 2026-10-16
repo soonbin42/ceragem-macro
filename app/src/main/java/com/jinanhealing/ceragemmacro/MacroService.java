@@ -147,6 +147,7 @@ public class MacroService extends AccessibilityService {
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
+        boolean relaunch = true; // 처음 한 번만 앱을 새로 연다
         for (int k = 0; k < devices.size(); k++) {
             if (stopRequested) {
                 lines.append("⏹ 사용자가 중지함\n");
@@ -154,11 +155,13 @@ public class MacroService extends AccessibilityService {
             }
             String name = c.deviceName(devices.get(k));
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
-            Result r = doDevice(c, mode, name);
+            Result r = doDevice(c, mode, name, relaunch);
             if (r.kind == Result.FAIL && !stopRequested) {
                 toast(name + " 다시 시도");
-                r = doDevice(c, mode, name);
+                r = doDevice(c, mode, name, true);
             }
+            // 목록으로 빨리 돌아왔으면 다음 기기는 앱을 다시 열지 않는다
+            relaunch = stopRequested || !returnToList(c);
             if (r.kind == Result.OK) ok++;
             else if (r.kind == Result.SKIP) skip++;
             else fail++;
@@ -171,10 +174,10 @@ public class MacroService extends AccessibilityService {
                 + lines;
     }
 
-    private Result doDevice(Config c, int mode, String name) {
-        if (!launchTarget()) return Result.fail("세라젬 IoT 앱을 열 수 없음");
+    private Result doDevice(Config c, int mode, String name, boolean relaunch) {
+        if (relaunch && !launchTarget()) return Result.fail("세라젬 IoT 앱을 열 수 없음");
 
-        AccessibilityNodeInfo card = findCard(c, name);
+        AccessibilityNodeInfo card = findCard(c, name, relaunch);
         if (stopRequested) return Result.fail("중지됨");
         if (card == null) return Result.fail("목록에서 기기를 찾지 못함");
 
@@ -197,9 +200,9 @@ public class MacroService extends AccessibilityService {
         if (power == null) return Result.fail("기기 화면이 열리지 않음");
 
         if (mode == MODE_ON || mode == MODE_OFF) {
-            sleep(800);
+            sleep(500);
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
-            sleep(2500);
+            sleep(1200);
             return Result.ok(mode == MODE_ON ? "켰음" : "껐음");
         }
         return runMassage(c);
@@ -245,14 +248,14 @@ public class MacroService extends AccessibilityService {
     }
 
     /** 목록이 뜰 때까지 기다린 뒤, 필요하면 스크롤하면서 기기 카드를 찾는다. */
-    private AccessibilityNodeInfo findCard(Config c, String name) {
+    private AccessibilityNodeInfo findCard(Config c, String name, boolean fresh) {
         final String head = c.prefix.trim();
         AccessibilityNodeInfo any = waitFor(() -> {
-            dismissPopups();
+            if (fresh) dismissPopups();
             return findTextStartingWith(head);
-        }, 25000);
+        }, fresh ? 25000 : 4000);
         if (any == null) return null;
-        sleep(1500); // 기기 상태 글자가 새로 고쳐질 시간
+        sleep(fresh ? 1500 : 300); // 기기 상태 글자가 새로 고쳐질 시간
 
         for (int i = 0; i < 12 && !stopRequested; i++) {
             AccessibilityNodeInfo t = findExactText(name);
@@ -266,6 +269,16 @@ public class MacroService extends AccessibilityService {
         }
         AccessibilityNodeInfo t = findExactText(name);
         return t == null ? null : containerOf(t);
+    }
+
+    /** 기기 화면에서 뒤로 가서 목록이 다시 보이면 true. */
+    private boolean returnToList(Config c) {
+        final String head = c.prefix.trim();
+        if (findById(c.powerId) == null && findTextStartingWith(head) != null) return true;
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        AccessibilityNodeInfo list = waitFor(() ->
+                findById(c.powerId) == null ? findTextStartingWith(head) : null, 4000);
+        return list != null;
     }
 
     private void dismissPopups() {
