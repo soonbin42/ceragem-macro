@@ -331,6 +331,40 @@ public class MacroService extends AccessibilityService {
 
     private static final String ID_MODES_BTN = "kr.co.ceragem.iot:id/open_body_parts_modes";
     private static final String ID_SPINE_MODES_BTN = "kr.co.ceragem.iot:id/open_body_parts_spine_modes";
+    private static final String ID_SHEET_DONE = "kr.co.ceragem.iot:id/do_positive";
+    private static final String ID_SHEET_ITEM_TITLE = "kr.co.ceragem.iot:id/item_widget_03";
+
+    /** 모드 선택 창의 항목 제목. 예: "[표준]2.릴렉스" → 번호 "2" 또는 이름 "릴렉스"가 맞는 것. */
+    private AccessibilityNodeInfo findSheetItem(String no, String name) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> titles = root.findAccessibilityNodeInfosByViewId(ID_SHEET_ITEM_TITLE);
+        if (titles == null) return null;
+        AccessibilityNodeInfo byName = null;
+        for (AccessibilityNodeInfo t : titles) {
+            if (!t.isVisibleToUser() || t.getText() == null) continue;
+            String raw = t.getText().toString();
+            String body = raw.contains("]") ? raw.substring(raw.indexOf(']') + 1).trim() : raw.trim();
+            String n = norm(body);
+            if (!no.isEmpty() && n.startsWith(no + ".")) {
+                if (name.isEmpty() || n.contains(norm(name))) return t;   // 번호와 이름 둘 다 맞으면 바로
+                if (byName == null) byName = t;
+            } else if (!name.isEmpty() && n.contains(norm(name)) && byName == null) {
+                byName = t;
+            }
+        }
+        return byName;
+    }
+
+    private AccessibilityNodeInfo visibleDesc(String desc) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        String want = norm(desc);
+        for (AccessibilityNodeInfo n : allNodes(root)) {
+            if (n.isVisibleToUser() && norm(n.getContentDescription()).equals(want)) return n;
+        }
+        return null;
+    }
 
     /** 척추(첫 번째) 페이지의 모드를 설정한 모드(기본: 릴렉스 모드)로 바꾼다. ▶는 누르지 않는다. */
     private Result changeSpineMode(Config c) {
@@ -362,28 +396,50 @@ public class MacroService extends AccessibilityService {
             return Result.fail("모드 버튼을 누르지 못함");
         }
 
-        // 목록에서 릴렉스 고르기
-        AccessibilityNodeInfo item = waitFor(() -> {
-            AccessibilityNodeInfo n = popupItem(target, false);
-            if (n == null && !shortName.isEmpty()) n = popupItem(shortName, false);
-            if (n == null && !shortName.isEmpty()) n = popupItem(shortName, true);
-            if (n == null && !no.isEmpty()) n = visibleNumberItem(no);
-            return n;
+        // 모드 선택 창(아래에서 올라오는 시트)이 뜰 때까지
+        AccessibilityNodeInfo sheet = waitFor(() -> {
+            AccessibilityNodeInfo n = findById(ID_SHEET_DONE);
+            return n != null ? n : findById(ID_SHEET_ITEM_TITLE);
         }, 4000);
+        if (sheet == null) {
+            log("모드 선택 창이 뜨지 않음");
+            snapshot("모드 버튼 누른 뒤");
+            return Result.fail("모드 선택 창이 열리지 않음");
+        }
+        sleep(pick(500, 300, 200));
+
+        // '자동 모드' 탭이 선택돼 있지 않으면 누른다(선택된 탭은 누를 수 없는 상태로 나옴)
+        AccessibilityNodeInfo autoTab = visibleDesc("자동 모드");
+        if (autoTab != null && autoTab.isClickable()) {
+            autoTab.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            sleep(pick(800, 500, 350));
+        }
+
+        // "[표준]2.릴렉스" 같은 항목 찾기 — 번호("2.") 또는 이름("릴렉스")으로
+        AccessibilityNodeInfo item = waitFor(() -> findSheetItem(no, shortName), 3000);
         if (item == null) {
+            log("모드 목록에서 '" + no + "." + shortName + "' 항목을 찾지 못함");
+            snapshot("모드 선택 창");
             performGlobalAction(GLOBAL_ACTION_BACK);
             return Result.fail("모드 목록에서 '" + shortName + "'을 찾지 못함");
         }
-        clickNode(item);
-        sleep(pick(600, 400, 250));
-        String[] confirm = {"확인", "적용", "선택", "완료", "변경"};
-        for (String l : confirm) {
-            AccessibilityNodeInfo n = visibleText(l);
-            if (n != null) {
-                clickNode(n);
-                break;
-            }
+        log("모드 항목 선택: " + item.getText());
+        // 줄 전체(누를 수 있는 부모)를 누른다. 오른쪽 ＋ 버튼은 누르지 않는다.
+        AccessibilityNodeInfo row = item.getParent();
+        boolean picked = row != null && row.isClickable() && row.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        if (!picked) picked = clickNode(item);
+        if (!picked) return Result.fail("모드 항목을 누르지 못함");
+        sleep(pick(700, 450, 300));
+
+        // ✓ 완료
+        AccessibilityNodeInfo doneBtn = findById(ID_SHEET_DONE);
+        if (doneBtn == null) doneBtn = visibleTextContaining("완료");
+        if (doneBtn != null) {
+            if (!doneBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(doneBtn);
+        } else {
+            log("완료 버튼을 찾지 못함");
         }
+        sleep(pick(800, 500, 300));
         AccessibilityNodeInfo done = waitFor(() -> {
             if (isModeCentered(target)) return getRootInActiveWindow();
             AccessibilityNodeInfo b = findCenteredOrVisible(ID_MODES_BTN);
@@ -391,6 +447,9 @@ public class MacroService extends AccessibilityService {
             return (b != null && !no.isEmpty() && no.equals(norm(b.getText()))) ? b : null;
         }, 4000);
         if (done != null) return Result.ok(target + "로 변경");
+        issues++;
+        log("모드를 골랐지만 모드 번호가 " + no + "로 바뀐 것을 확인하지 못함");
+        snapshot("모드 변경 확인 실패");
         return Result.skip(shortName + " 선택함 — 변경 확인 안 됨");
     }
 
