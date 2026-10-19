@@ -95,6 +95,15 @@ public class MacroService extends AccessibilityService {
             return this;
         }
 
+        /** 기기 상태 때문에 생긴 예상된 실패(예: 전원 꺼짐) — 재시도·리포트 안 함. */
+        boolean expected = false;
+
+        Result expected() {
+            expected = true;
+            noRetry = true;
+            return this;
+        }
+
         static Result ok(String m) { return new Result(OK, m); }
         static Result skip(String m) { return new Result(SKIP, m); }
         static Result fail(String m) { return new Result(FAIL, m); }
@@ -214,7 +223,9 @@ public class MacroService extends AccessibilityService {
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
             log("── " + name);
             Result r = doDevice(c, mode, name, relaunch);
-            if (r.kind == Result.FAIL) {
+            if (r.kind == Result.FAIL && r.expected) {
+                log("❌ " + r.msg + " (기기 상태라 재시도 안 함)");
+            } else if (r.kind == Result.FAIL) {
                 issues++;
                 log("❌ 실패: " + r.msg + (r.noRetry ? " (▶를 이미 눌러서 재시도 안 함)" : ""));
                 snapshot(name + " 실패 직후");
@@ -277,7 +288,7 @@ public class MacroService extends AccessibilityService {
         } else if (mode == MODE_OFF) {
             if (off) return Result.skip("이미 꺼져 있음");
         } else {
-            if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기");
+            if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
         }
 
         if (!clickNode(card)) return Result.fail("기기 카드를 누르지 못함");
@@ -631,26 +642,19 @@ public class MacroService extends AccessibilityService {
         String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
 
         showModePages();
-        // 맨 앞 페이지로
-        for (int i = 0; i < 6 && !stopRequested; i++) {
-            AccessibilityNodeInfo pager = findById(ID_MODE_PAGES);
-            if (pager == null || !pager.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) break;
-            sleep(pick(900, 600, 400));
-        }
-
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
-        int current = 1;
         for (int target : pages) {
             if (stopRequested) break;
             showModePages();
-            while (current < target && !stopRequested) {
-                if (!scrollModePager(true)) swipeCarousel(true);
-                current++;
-                sleep(pick(1000, 700, 450));
-            }
-            sleep(pick(500, 250, 120));
-            AccessibilityNodeInfo play = findCenteredById(pid);
+            int now = goToPage(target);
+            if (now != target && now != -1) log("⚠ " + target + "번 페이지로 못 감 (현재 " + now + "번)");
+            // 넘김 애니메이션이 끝나 ▶가 화면 가운데에 자리 잡을 때까지 기다린다
+            final String pidW = pid;
+            AccessibilityNodeInfo play = waitFor(() -> findCenteredById(pidW), pick(3000, 2500, 2000));
             if (play == null) {
+                issues++;
+                log(target + "번 페이지 ▶ 못 찾음 (현재 페이지 " + currentPage() + ")");
+                snapshot(target + "번 페이지 ▶ 못 찾음");
                 failed.add(target + "번 페이지 ▶ 못 찾음");
                 continue;
             }
@@ -694,6 +698,48 @@ public class MacroService extends AccessibilityService {
         }
         if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
         return Result.ok(msg.toString());
+    }
+
+    private static final String[] ID_PAGE_DOTS = {
+            "kr.co.ceragem.iot:id/summary_graph_body_parts_spine_indicator",
+            "kr.co.ceragem.iot:id/summary_graph_body_parts_stomach_indicator",
+            "kr.co.ceragem.iot:id/summary_graph_body_parts_calf_indicator"};
+
+    /** 아래 점(●○○)으로 지금 몇 번째 페이지인지. 모르면 -1. */
+    private int currentPage() {
+        for (int i = 0; i < ID_PAGE_DOTS.length; i++) {
+            AccessibilityNodeInfo d = findById(ID_PAGE_DOTS[i]);
+            if (d != null && d.isChecked()) return i + 1;
+        }
+        return -1;
+    }
+
+    /** 점 표시를 보며 원하는 페이지까지 넘긴다. 점을 못 읽으면 맨 앞으로 간 뒤 칸 수만큼 넘긴다. */
+    private int goToPage(int target) {
+        int cur = currentPage();
+        if (cur == -1) {
+            for (int i = 0; i < 4 && !stopRequested; i++) {
+                if (!scrollModePager(false)) break;
+                sleep(pick(900, 600, 450));
+            }
+            for (int i = 1; i < target && !stopRequested; i++) {
+                if (!scrollModePager(true)) swipeCarousel(true);
+                sleep(pick(1000, 700, 450));
+            }
+            return -1;
+        }
+        for (int guard = 0; guard < 6 && cur != target && !stopRequested; guard++) {
+            final boolean fwd = cur < target;
+            if (!scrollModePager(fwd)) swipeCarousel(fwd);
+            final int before = cur;
+            waitFor(() -> {
+                int p = currentPage();
+                return (p != -1 && p != before) ? getRootInActiveWindow() : null;
+            }, pick(1500, 1200, 1000));
+            cur = currentPage();
+            if (cur == -1) cur = before + (fwd ? 1 : -1);
+        }
+        return cur;
     }
 
     /** ▶ 버튼이 속한 페이지의 [모드 이름, 상태 글자]. */
