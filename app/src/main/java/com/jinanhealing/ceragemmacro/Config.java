@@ -20,7 +20,7 @@ public class Config {
     public String playId = "";
     public String changeModeName = "릴렉스 모드";
     public String changeModeNo = "2";
-    public String changeSpeed = "저속";
+    public String changeSpeed = "고속";
     public String powerId = DEFAULT_POWER_ID;
     /** 0 안정 · 1 보통 · 2 빠름 */
     public int speed = 2;
@@ -42,6 +42,8 @@ public class Config {
         c.changeModeName = p.getString("changeModeName", c.changeModeName);
         c.changeModeNo = p.getString("changeModeNo", c.changeModeNo);
         c.changeSpeed = p.getString("changeSpeed", c.changeSpeed);
+        // v1.0.18: 모드 변경 후 속도 기본값을 고속으로
+        if (p.getInt("cfgVer", 1) < 4 && "저속".equals(c.changeSpeed.trim())) c.changeSpeed = "고속";
         c.powerId = p.getString("powerId", DEFAULT_POWER_ID);
         c.speed = Math.max(0, Math.min(2, p.getInt("speed", 2)));
         String sel = p.getString("selected", null);
@@ -75,7 +77,7 @@ public class Config {
                 .putString("changeSpeed", changeSpeed)
                 .putString("powerId", powerId)
                 .putInt("speed", speed)
-                .putInt("cfgVer", 3)
+                .putInt("cfgVer", 4)
                 .putString("selected", sb.toString())
                 .apply();
     }
