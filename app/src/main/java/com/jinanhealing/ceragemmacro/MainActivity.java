@@ -41,7 +41,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private Button a11yButton;
     private GridLayout grid;
-    private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit, changeNoEdit;
+    private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit, changeNoEdit, changeSpeedEdit;
     private TextView reportView;
     private Button shareDumpButton, shareIssueButton;
     private Config cfg;
@@ -207,6 +207,7 @@ public class MainActivity extends Activity {
         modeEdit = field(setCard, "실행할 페이지 번호 (1=척추, 2=음파 진동 · 모드 이름으로 적어도 됨)", cfg.modeName, false);
         changeEdit = field(setCard, "모드 변경 버튼으로 바꿀 모드", cfg.changeModeName, false);
         changeNoEdit = field(setCard, "그 모드의 번호 (모드 창에서 몇 번인지, 릴렉스 = 2)", cfg.changeModeNo, true);
+        changeSpeedEdit = field(setCard, "모드 변경 후 속도 (저속 / 정속 / 고속 · 비우면 그대로)", cfg.changeSpeed, false);
         playIdEdit = field(setCard, "▶ 버튼 ID (비워 두면 자동으로 찾음)", cfg.playId, false);
         Button save = smallButton("설정 저장");
         save.setOnClickListener(v -> saveFromUi(true));
@@ -291,6 +292,7 @@ public class MainActivity extends Activity {
         String cm = changeEdit.getText().toString().trim();
         cfg.changeModeName = cm.isEmpty() ? "릴렉스 모드" : cm;
         cfg.changeModeNo = changeNoEdit.getText().toString().trim();
+        cfg.changeSpeed = changeSpeedEdit.getText().toString().trim();
         cfg.save(this);
         rebuildGrid();
         countEdit.setText(String.valueOf(cfg.count));

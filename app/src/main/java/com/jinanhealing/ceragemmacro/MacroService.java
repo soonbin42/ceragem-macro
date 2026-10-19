@@ -390,7 +390,10 @@ public class MacroService extends AccessibilityService {
         if (btn == null) btn = findCenteredOrVisible(ID_SPINE_MODES_BTN);
         if (btn == null) return Result.fail("모드 버튼을 찾지 못함");
         if ((!no.isEmpty() && no.equals(norm(btn.getText()))) || isModeCentered(target)) {
-            return Result.skip("이미 " + target + (no.isEmpty() ? "" : " (모드 " + no + ")"));
+            String spMsg = applySpeed(c);
+            String base = "이미 " + target + (no.isEmpty() ? "" : " (모드 " + no + ")");
+            return spMsg.startsWith("속도 ") && !spMsg.contains("이미") && !spMsg.contains("못")
+                    ? Result.ok(base + " / " + spMsg) : Result.skip(base + (spMsg.isEmpty() ? "" : " / " + spMsg));
         }
         if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) {
             return Result.fail("모드 버튼을 누르지 못함");
@@ -446,11 +449,53 @@ public class MacroService extends AccessibilityService {
             if (b == null) b = findCenteredOrVisible(ID_SPINE_MODES_BTN);
             return (b != null && !no.isEmpty() && no.equals(norm(b.getText()))) ? b : null;
         }, 4000);
-        if (done != null) return Result.ok(target + "로 변경");
+        if (done != null) {
+            // 모드를 바꾸면 속도가 '정속'으로 돌아가므로, 설정한 속도로 다시 맞춘다
+            String spMsg = applySpeed(c);
+            return Result.ok(target + "로 변경" + (spMsg.isEmpty() ? "" : " / " + spMsg));
+        }
         issues++;
         log("모드를 골랐지만 모드 번호가 " + no + "로 바뀐 것을 확인하지 못함");
         snapshot("모드 변경 확인 실패");
         return Result.skip(shortName + " 선택함 — 변경 확인 안 됨");
+    }
+
+    private static final String ID_SPEED_BTN = "kr.co.ceragem.iot:id/open_spine_mode_speeds";
+
+    /** 속도 버튼 → 저속/정속/고속 고르고 ✓ 완료. 설정이 비어 있으면 아무것도 안 함. */
+    private String applySpeed(Config c) {
+        String sp = c.changeSpeed == null ? "" : c.changeSpeed.trim();
+        String rid;
+        if (sp.contains("저")) rid = "kr.co.ceragem.iot:id/speed_low";
+        else if (sp.contains("정")) rid = "kr.co.ceragem.iot:id/speed_constant";
+        else if (sp.contains("고")) rid = "kr.co.ceragem.iot:id/speed_high";
+        else return "";
+        sleep(pick(800, 500, 300));
+        AccessibilityNodeInfo btn = findCenteredOrVisible(ID_SPEED_BTN);
+        if (btn == null) {
+            log("속도 버튼을 찾지 못함");
+            snapshot("속도 버튼 찾기");
+            return "속도 버튼 못 찾음";
+        }
+        if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) return "속도 버튼 못 누름";
+        final String ridF = rid;
+        AccessibilityNodeInfo radio = waitFor(() -> findById(ridF), 3000);
+        if (radio == null) {
+            log("속도 선택 창이 뜨지 않음");
+            snapshot("속도 버튼 누른 뒤");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            return "속도 창 못 엶";
+        }
+        sleep(pick(400, 250, 150));
+        boolean was = radio.isChecked();
+        if (!was && !radio.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(radio);
+        sleep(pick(500, 300, 200));
+        AccessibilityNodeInfo doneBtn = findById(ID_SHEET_DONE);
+        if (doneBtn != null && !doneBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(doneBtn);
+        sleep(pick(800, 500, 300));
+        String label = sp.contains("저") ? "저속" : sp.contains("정") ? "정속" : "고속";
+        log("속도 " + label + (was ? " (이미 선택돼 있었음)" : " 선택"));
+        return was ? "속도 이미 " + label : "속도 " + label;
     }
 
     private AccessibilityNodeInfo findCenteredOrVisible(String id) {

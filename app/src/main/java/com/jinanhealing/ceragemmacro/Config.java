@@ -20,6 +20,7 @@ public class Config {
     public String playId = "";
     public String changeModeName = "릴렉스 모드";
     public String changeModeNo = "2";
+    public String changeSpeed = "저속";
     public String powerId = DEFAULT_POWER_ID;
     /** 0 안정 · 1 보통 · 2 빠름 */
     public int speed = 2;
@@ -40,6 +41,7 @@ public class Config {
         c.playId = p.getString("playId", "");
         c.changeModeName = p.getString("changeModeName", c.changeModeName);
         c.changeModeNo = p.getString("changeModeNo", c.changeModeNo);
+        c.changeSpeed = p.getString("changeSpeed", c.changeSpeed);
         c.powerId = p.getString("powerId", DEFAULT_POWER_ID);
         c.speed = Math.max(0, Math.min(2, p.getInt("speed", 2)));
         String sel = p.getString("selected", null);
@@ -70,6 +72,7 @@ public class Config {
                 .putString("playId", playId)
                 .putString("changeModeName", changeModeName)
                 .putString("changeModeNo", changeModeNo)
+                .putString("changeSpeed", changeSpeed)
                 .putString("powerId", powerId)
                 .putInt("speed", speed)
                 .putInt("cfgVer", 3)
