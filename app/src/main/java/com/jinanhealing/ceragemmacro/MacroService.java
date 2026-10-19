@@ -646,8 +646,8 @@ public class MacroService extends AccessibilityService {
         for (int target : pages) {
             if (stopRequested) break;
             showModePages();
-            int now = goToPage(target);
-            if (now != target && now != -1) log("⚠ " + target + "번 페이지로 못 감 (현재 " + now + "번)");
+            int reached = goToPage(target);
+            if (reached != target && reached != -1) log("⚠ " + target + "번 페이지로 못 감 (현재 " + reached + "번)");
             // 넘김 애니메이션이 끝나 ▶가 화면 가운데에 자리 잡을 때까지 기다린다
             final String pidW = pid;
             AccessibilityNodeInfo play = waitFor(() -> findCenteredById(pidW), pick(3000, 2500, 2000));
