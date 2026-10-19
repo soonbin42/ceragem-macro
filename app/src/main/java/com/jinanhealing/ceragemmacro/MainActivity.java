@@ -145,7 +145,7 @@ public class MainActivity extends Activity {
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.addView(squareButton("전체\n끄기", "■", Color.parseColor("#444444"), v -> startMode(MacroService.MODE_OFF)));
-        row2.addView(squareButton("모드\n변경", "↻", Color.parseColor("#6A4C93"), v -> startMode(MacroService.MODE_CHANGE)));
+        row2.addView(splitModeButtons());
         root.addView(row2);
 
         // 대상 기기
@@ -378,6 +378,52 @@ public class MainActivity extends Activity {
         protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
             super.onMeasure(widthMeasureSpec, widthMeasureSpec);
         }
+    }
+
+    /** 가로 폭만큼 세로를 맞추는 세로 묶음(정사각형 칸을 위아래 반으로 나눌 때). */
+    private static class SquareColumn extends LinearLayout {
+        SquareColumn(android.content.Context c) {
+            super(c);
+            setOrientation(VERTICAL);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            super.onMeasure(widthMeasureSpec, widthMeasureSpec);
+        }
+    }
+
+    /** 모드 변경 칸을 반으로: 위 = 릴렉스 + 고속, 아래 = 릴렉스 + 저속. */
+    private View splitModeButtons() {
+        SquareColumn col = new SquareColumn(this);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        clp.setMargins(dp(5), dp(5), dp(5), dp(5));
+        col.setLayoutParams(clp);
+        col.addView(halfButton("↻ 모드 변경\n고속", Color.parseColor("#6A4C93"),
+                v -> startMode(MacroService.MODE_CHANGE_FAST), true));
+        col.addView(halfButton("↻ 모드 변경\n저속", Color.parseColor("#4E7CA8"),
+                v -> startMode(MacroService.MODE_CHANGE_SLOW), false));
+        return col;
+    }
+
+    private Button halfButton(String label, int color, View.OnClickListener l, boolean top) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(19);
+        b.setTextColor(Color.WHITE);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(20));
+        b.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        if (top) lp.bottomMargin = dp(5);
+        else lp.topMargin = dp(5);
+        b.setLayoutParams(lp);
+        b.setOnClickListener(l);
+        return b;
     }
 
     private Button squareButton(String label, String icon, int color, View.OnClickListener l) {

@@ -41,6 +41,10 @@ public class MacroService extends AccessibilityService {
     public static final int MODE_OFF = 3;
     public static final int MODE_ON_RUN = 4;
     public static final int MODE_CHANGE = 5;
+    public static final int MODE_CHANGE_FAST = 6;
+    public static final int MODE_CHANGE_SLOW = 7;
+    /** 이번 실행에만 쓰는 속도(모드 변경 고속/저속 버튼). 비어 있으면 설정값. */
+    private volatile String speedOverride = "";
 
     public static volatile MacroService instance;
 
@@ -154,6 +158,8 @@ public class MacroService extends AccessibilityService {
             case MODE_OFF: return "끄기";
             case MODE_ON_RUN: return "켜고 바로 실행";
             case MODE_CHANGE: return "모드 변경";
+            case MODE_CHANGE_FAST: return "모드 변경(고속)";
+            case MODE_CHANGE_SLOW: return "모드 변경(저속)";
             default: return "?";
         }
     }
@@ -164,6 +170,7 @@ public class MacroService extends AccessibilityService {
         if (running) return false;
         running = true;
         stopRequested = false;
+        speedOverride = mode == MODE_CHANGE_FAST ? "고속" : mode == MODE_CHANGE_SLOW ? "저속" : "";
         new Thread(() -> {
             String report;
             try {
@@ -325,7 +332,7 @@ public class MacroService extends AccessibilityService {
             }, pick(5000, 4000, 3000));
             return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
-        if (mode == MODE_CHANGE) return changeSpineMode(c);
+        if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) return changeSpineMode(c);
         return runMassage(c);
     }
 
@@ -464,7 +471,7 @@ public class MacroService extends AccessibilityService {
 
     /** 속도 버튼 → 저속/정속/고속 고르고 ✓ 완료. 설정이 비어 있으면 아무것도 안 함. */
     private String applySpeed(Config c) {
-        String sp = c.changeSpeed == null ? "" : c.changeSpeed.trim();
+        String sp = !speedOverride.isEmpty() ? speedOverride : (c.changeSpeed == null ? "" : c.changeSpeed.trim());
         String rid;
         if (sp.contains("저")) rid = "kr.co.ceragem.iot:id/speed_low";
         else if (sp.contains("정")) rid = "kr.co.ceragem.iot:id/speed_constant";
