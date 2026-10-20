@@ -505,8 +505,9 @@ public class MacroService extends AccessibilityService {
             return "속도 창 못 엶";
         }
         sleep(pick(400, 250, 150));
-        boolean was = radio.isChecked();
-        if (!was && !radio.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(radio);
+        // 체크 상태 표시는 믿을 수 없어서 항상 누른다(이미 선택된 것을 누르면 아무 변화 없음)
+        boolean was = false;
+        if (!radio.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(radio);
         sleep(pick(500, 300, 200));
         AccessibilityNodeInfo doneBtn = findById(ID_SHEET_DONE);
         if (doneBtn != null && !doneBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(doneBtn);
@@ -642,6 +643,7 @@ public class MacroService extends AccessibilityService {
         String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
 
         showModePages();
+        waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 3000);
         // 맨 앞 페이지로: 더 이상 뒤로 못 갈 때까지
         for (int i = 0; i < 5 && !stopRequested; i++) {
             final String before = centeredTitle();
@@ -652,49 +654,74 @@ public class MacroService extends AccessibilityService {
             }, pick(1200, 900, 700));
         }
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
+        // 지나온 페이지의 모드 이름(같은 페이지를 두 번 누르지 않기 위해)
+        final java.util.Set<String> visited = new java.util.HashSet<>();
         int current = 1;
+        String first = centeredTitle();
+        if (!first.isEmpty()) visited.add(first);
         for (int target : pages) {
             if (stopRequested) break;
             showModePages();
-            // 한 칸씩 넘기고, 가운데 모드 이름이 실제로 바뀐 것을 확인한다
+            // 페이지 이름이 화면에 자리 잡을 때까지(진행 화면에서 돌아온 직후 등)
+            waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 3000);
+            // 한 칸씩 넘기고, 가운데 모드 이름이 '처음 보는 이름'으로 바뀐 것을 확인한다
             while (current < target && !stopRequested) {
                 final String before = centeredTitle();
+                if (before.isEmpty()) {
+                    log("⚠ 가운데 모드 이름을 읽지 못해 넘기지 않음");
+                    snapshot("모드 이름 읽기 실패");
+                    break;
+                }
+                visited.add(before);
                 if (!scrollModePager(true)) swipeCarousel(true);
                 AccessibilityNodeInfo moved = waitFor(() -> {
                     String t = centeredTitle();
-                    return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+                    return (!t.isEmpty() && !visited.contains(t)) ? getRootInActiveWindow() : null;
                 }, pick(2500, 2000, 1500));
                 if (moved == null) {
-                    // 한 번 더 손가락으로 밀어 본다
-                    swipeCarousel(true);
+                    swipeCarousel(true);   // 한 번 더 손가락으로 밀어 본다
                     moved = waitFor(() -> {
                         String t = centeredTitle();
-                        return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+                        return (!t.isEmpty() && !visited.contains(t)) ? getRootInActiveWindow() : null;
                     }, pick(2500, 2000, 1500));
                 }
                 if (moved == null) {
-                    log("⚠ " + (current + 1) + "번 페이지로 넘어가지 않음 (가운데 '" + before + "')");
+                    log("⚠ " + (current + 1) + "번 페이지로 넘어가지 않음 (가운데 '" + centeredTitle() + "')");
                     snapshot((current + 1) + "번 페이지 넘김 실패");
                     break;
                 }
                 current++;
-                log((current) + "번 페이지로 넘김: '" + before + "' → '" + centeredTitle() + "'");
+                log(current + "번 페이지로 넘김: '" + before + "' → '" + centeredTitle() + "'");
             }
             if (current != target) {
                 issues++;
                 failed.add(target + "번 페이지로 못 넘어감");
                 continue;
             }
-            // 넘김 애니메이션이 끝나 ▶가 화면 가운데에 자리 잡을 때까지 기다린다
+            // ▶가 '지금 가운데 이름의 페이지' 안에서 자리 잡을 때까지 기다린다
             final String pidW = pid;
-            AccessibilityNodeInfo play = waitFor(() -> findCenteredById(pidW), pick(3000, 2500, 2000));
+            final String want = centeredTitle();
+            AccessibilityNodeInfo play = waitFor(() -> {
+                AccessibilityNodeInfo p = findCenteredById(pidW);
+                if (p == null) return null;
+                String t = pageTexts(p)[0].trim();
+                return (t.isEmpty() || t.equals(want)) ? p : null;
+            }, pick(3000, 2500, 2000));
             if (play == null) {
                 issues++;
-                log(target + "번 페이지 ▶ 못 찾음 (현재 페이지 " + currentPage() + ")");
+                log(target + "번 페이지('" + want + "') ▶ 못 찾음");
                 snapshot(target + "번 페이지 ▶ 못 찾음");
                 failed.add(target + "번 페이지 ▶ 못 찾음");
                 continue;
             }
+            if (target > 1 && visited.contains(pageTexts(play)[0].trim()) && !pageTexts(play)[0].trim().equals(want)) {
+                issues++;
+                log("⚠ " + target + "번 페이지 ▶가 앞 페이지 것으로 보여 누르지 않음");
+                snapshot(target + "번 페이지 ▶ 확인 실패");
+                failed.add(target + "번 페이지 확인 실패");
+                continue;
+            }
+            visited.add(want);
             String[] ts = pageTexts(play);
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
@@ -755,34 +782,6 @@ public class MacroService extends AccessibilityService {
             if (d != null && d.isChecked()) return i + 1;
         }
         return -1;
-    }
-
-    /** 점 표시를 보며 원하는 페이지까지 넘긴다. 점을 못 읽으면 맨 앞으로 간 뒤 칸 수만큼 넘긴다. */
-    private int goToPage(int target) {
-        int cur = currentPage();
-        if (cur == -1) {
-            for (int i = 0; i < 4 && !stopRequested; i++) {
-                if (!scrollModePager(false)) break;
-                sleep(pick(900, 600, 450));
-            }
-            for (int i = 1; i < target && !stopRequested; i++) {
-                if (!scrollModePager(true)) swipeCarousel(true);
-                sleep(pick(1000, 700, 450));
-            }
-            return -1;
-        }
-        for (int guard = 0; guard < 6 && cur != target && !stopRequested; guard++) {
-            final boolean fwd = cur < target;
-            if (!scrollModePager(fwd)) swipeCarousel(fwd);
-            final int before = cur;
-            waitFor(() -> {
-                int p = currentPage();
-                return (p != -1 && p != before) ? getRootInActiveWindow() : null;
-            }, pick(1500, 1200, 1000));
-            cur = currentPage();
-            if (cur == -1) cur = before + (fwd ? 1 : -1);
-        }
-        return cur;
     }
 
     /** ▶ 버튼이 속한 페이지의 [모드 이름, 상태 글자]. */
