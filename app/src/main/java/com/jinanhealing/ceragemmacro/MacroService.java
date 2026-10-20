@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
@@ -183,6 +184,17 @@ public class MacroService extends AccessibilityService {
         speedOverride = mode == MODE_CHANGE_FAST ? "고속" : mode == MODE_CHANGE_SLOW ? "저속" : "";
         new Thread(() -> {
             String report;
+            PowerManager.WakeLock wl = null;
+            try {
+                // 실행 중 화면이 꺼지면 터치가 안 되므로 화면을 켜 둔다(최대 15분)
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null) {
+                    wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                            "ceragem:run");
+                    wl.acquire(15 * 60 * 1000L);
+                }
+            } catch (Throwable ignored) {
+            }
             try {
                 if (mode == MODE_ON_RUN) {
                     report = runAll(MODE_ON);
@@ -194,6 +206,10 @@ public class MacroService extends AccessibilityService {
                 report = "오류가 발생했어요: " + t;
             } finally {
                 running = false;
+                try {
+                    if (wl != null && wl.isHeld()) wl.release();
+                } catch (Throwable ignored) {
+                }
             }
             showInApp(report, null);
         }, "ceragem-macro").start();
@@ -317,8 +333,17 @@ public class MacroService extends AccessibilityService {
             }
             if (power == null) return Result.fail("가운데 전원 버튼을 찾지 못함");
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
-            sleep(pick(2000, 1000, 600));
-            return Result.ok("켰음");
+            // 켜지면 오른쪽 위 전원 버튼이 생기고 '전원을 켜 주세요'가 사라진다
+            AccessibilityNodeInfo on = waitFor(() -> {
+                AccessibilityNodeInfo b = findById(ID_POWER_OFF);
+                boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
+                return (b != null && b.isVisibleToUser() && !msg) ? b : null;
+            }, pick(5000, 4000, 3000));
+            if (on != null) return Result.ok("켰음");
+            issues++;
+            log("전원 버튼을 눌렀지만 켜진 화면이 확인되지 않음");
+            snapshot("켜기 확인 실패");
+            return Result.ok("전원 버튼 누름 (켜짐 확인 안 됨)");
         }
         if (mode == MODE_OFF) {
             sleep(pick(800, 400, 200));
@@ -396,15 +421,8 @@ public class MacroService extends AccessibilityService {
         sleep(pick(1200, 800, 500));
         showModePages();
 
-        // 모드 넘기기 화면을 맨 앞(척추 페이지)으로
-        AccessibilityNodeInfo pager = findById(ID_MODE_PAGES);
-        if (pager != null) {
-            for (int i = 0; i < 4 && pager.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD); i++) {
-                sleep(pick(900, 700, 500));
-                pager = findById(ID_MODE_PAGES);
-                if (pager == null) break;
-            }
-        }
+        // 모드 넘기기 화면을 맨 앞(척추 페이지)으로, 이름이 자리 잡을 때까지 확인
+        goToFirstPage();
         final String no = c.changeModeNo == null ? "" : c.changeModeNo.trim();
 
         // 아래쪽 '모드' 버튼 (숫자가 현재 모드 번호, 릴렉스 = 2)
@@ -432,6 +450,14 @@ public class MacroService extends AccessibilityService {
             return Result.fail("모드 선택 창이 열리지 않음");
         }
         sleep(pick(500, 300, 200));
+        // 척추 모드 창이 맞는지(음파 진동 페이지의 모드 창이면 잘못 바꾸지 않도록 닫는다)
+        if (findById("kr.co.ceragem.iot:id/master_v_body_parts_spine_modes") == null
+                && findById("kr.co.ceragem.iot:id/master_v_body_parts_spine_auto_modes") == null) {
+            log("열린 창이 척추 모드 창이 아님 — 닫고 중단");
+            snapshot("척추 모드 창 아님");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            return Result.fail("척추 모드 창이 아님 (첫 페이지로 못 감)");
+        }
 
         // '자동 모드' 탭이 선택돼 있지 않으면 누른다(선택된 탭은 누를 수 없는 상태로 나옴)
         AccessibilityNodeInfo autoTab = visibleDesc("자동 모드");
@@ -531,35 +557,6 @@ public class MacroService extends AccessibilityService {
         for (AccessibilityNodeInfo f : found) if (f.isVisibleToUser()) return f;
         return null;
     }
-
-    /** 모드 선택 창에서 번호(예: "2")가 적힌 항목. 아래쪽 모드·강도·온도 버튼은 제외. */
-    private AccessibilityNodeInfo visibleNumberItem(String no) {
-        for (AccessibilityNodeInfo n : findAllExactText(no)) {
-            if (!n.isVisibleToUser()) continue;
-            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName();
-            if (id.contains("open_body_parts")) continue;
-            return n;
-        }
-        return null;
-    }
-
-    /** 모드 선택 창의 항목. 뒤 화면의 모드 제목·머리글·안내 말풍선은 제외. */
-    private AccessibilityNodeInfo popupItem(String text, boolean contains) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return null;
-        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(text);
-        if (found == null) return null;
-        String want = norm(text);
-        for (AccessibilityNodeInfo n : found) {
-            if (!n.isVisibleToUser()) continue;
-            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName();
-            if (id.equals(ID_MODE_TITLE) || id.endsWith(":id/screen_widget_01") || id.endsWith(":id/tv_ai_message")) continue;
-            String t = norm(n.getText());
-            if (contains ? t.contains(want) : t.equals(want)) return n;
-        }
-        return null;
-    }
-
     private AccessibilityNodeInfo visibleTextContaining(String part) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return null;
@@ -647,16 +644,7 @@ public class MacroService extends AccessibilityService {
         String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
 
         showModePages();
-        waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 3000);
-        // 맨 앞 페이지로: 더 이상 뒤로 못 갈 때까지
-        for (int i = 0; i < 5 && !stopRequested; i++) {
-            final String before = centeredTitle();
-            if (!scrollModePager(false)) break;
-            waitFor(() -> {
-                String t = centeredTitle();
-                return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
-            }, pick(1200, 900, 700));
-        }
+        goToFirstPage();
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
         // 지나온 페이지의 모드 이름(같은 페이지를 두 번 누르지 않기 위해)
         final java.util.Set<String> visited = new java.util.HashSet<>();
@@ -783,24 +771,24 @@ public class MacroService extends AccessibilityService {
         return Result.ok(msg.toString());
     }
 
-    private static final String[] ID_PAGE_DOTS = {
-            "kr.co.ceragem.iot:id/summary_graph_body_parts_spine_indicator",
-            "kr.co.ceragem.iot:id/summary_graph_body_parts_stomach_indicator",
-            "kr.co.ceragem.iot:id/summary_graph_body_parts_calf_indicator"};
+    /** 모드 넘기기를 맨 앞 페이지로 되돌리고 이름이 자리 잡을 때까지 기다린다. */
+    private void goToFirstPage() {
+        waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 3000);
+        for (int i = 0; i < 5 && !stopRequested; i++) {
+            final String before = centeredTitle();
+            if (!scrollModePager(false)) break;
+            waitFor(() -> {
+                String t = centeredTitle();
+                return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+            }, pick(1200, 900, 700));
+        }
+        waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 2000);
+    }
 
     /** 화면 가운데 모드 페이지의 이름(예: 릴렉스 모드). */
     private String centeredTitle() {
         AccessibilityNodeInfo t = findCenteredById(ID_MODE_TITLE);
         return t == null || t.getText() == null ? "" : t.getText().toString().trim();
-    }
-
-    /** 아래 점(●○○)으로 지금 몇 번째 페이지인지. 모르면 -1. */
-    private int currentPage() {
-        for (int i = 0; i < ID_PAGE_DOTS.length; i++) {
-            AccessibilityNodeInfo d = findById(ID_PAGE_DOTS[i]);
-            if (d != null && d.isChecked()) return i + 1;
-        }
-        return -1;
     }
 
     /** ▶ 버튼이 속한 페이지의 [모드 이름, 상태 글자]. */
@@ -1112,35 +1100,6 @@ public class MacroService extends AccessibilityService {
         return n;
     }
 
-    private AccessibilityNodeInfo findPlay(Config c) {
-        String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
-        AccessibilityNodeInfo byId = findCenteredById(pid);
-        if (byId != null) return byId;
-        AccessibilityNodeInfo anchor = statusAnchor();
-        Rect screen = screenRect();
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (anchor == null || screen == null || root == null) return null;
-        Rect a = new Rect();
-        anchor.getBoundsInScreen(a);
-
-        AccessibilityNodeInfo best = null;
-        int bestDist = Integer.MAX_VALUE;
-        for (AccessibilityNodeInfo n : allNodes(root)) {
-            if (!n.isClickable() || !n.isVisibleToUser()) continue;
-            Rect r = new Rect();
-            n.getBoundsInScreen(r);
-            if (r.width() > screen.width() * 0.3) continue;            // 원 전체 같은 큰 영역 제외
-            if (Math.abs(r.centerX() - a.centerX()) > screen.width() * 0.12) continue;
-            if (r.top < a.bottom - 10 || r.top > a.bottom + screen.height() * 0.15) continue;
-            int d = r.top - a.bottom;
-            if (d < bestDist) {
-                bestDist = d;
-                best = n;
-            }
-        }
-        return best;
-    }
-
     /**
      * 켜진 기기 화면 오른쪽 위의 붉은 테두리 전원 버튼.
      * 1) 이름·설명에 power/전원이 들어간 버튼 → 2) 오른쪽 위 영역의 작은 버튼 중 가장 아래쪽(⋯ 메뉴 아래).
@@ -1181,16 +1140,6 @@ public class MacroService extends AccessibilityService {
         }
         return best;
     }
-
-    private Rect playGuess() {
-        AccessibilityNodeInfo anchor = statusAnchor();
-        if (anchor == null) return null;
-        Rect a = new Rect();
-        anchor.getBoundsInScreen(a);
-        int cy = a.bottom + a.height();
-        return new Rect(a.centerX() - 10, cy - 10, a.centerX() + 10, cy + 10);
-    }
-
     // ---------------------------------------------------------------- 문제 리포트
 
     private void log(String msg) {
@@ -1255,7 +1204,7 @@ public class MacroService extends AccessibilityService {
         } catch (Exception ignored) {
         }
         StringBuilder r = new StringBuilder();
-        r.append("# 세라젬 일괄조작 문제 리포트 ").append(ts).append('\n')
+        r.append(issues > 0 ? "# 세라젬 일괄조작 문제 리포트 " : "# 세라젬 일괄조작 진행 기록 ").append(ts).append('\n')
                 .append("일괄조작 앱 v").append(ver).append(" · 세라젬 IoT v").append(ceragemVer)
                 .append(" · ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                 .append(" · Android ").append(Build.VERSION.RELEASE).append("\n\n")
