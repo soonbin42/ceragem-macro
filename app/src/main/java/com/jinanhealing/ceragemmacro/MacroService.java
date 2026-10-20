@@ -642,12 +642,49 @@ public class MacroService extends AccessibilityService {
         String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
 
         showModePages();
+        // 맨 앞 페이지로: 더 이상 뒤로 못 갈 때까지
+        for (int i = 0; i < 5 && !stopRequested; i++) {
+            final String before = centeredTitle();
+            if (!scrollModePager(false)) break;
+            waitFor(() -> {
+                String t = centeredTitle();
+                return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+            }, pick(1200, 900, 700));
+        }
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
+        int current = 1;
         for (int target : pages) {
             if (stopRequested) break;
             showModePages();
-            int reached = goToPage(target);
-            if (reached != target && reached != -1) log("⚠ " + target + "번 페이지로 못 감 (현재 " + reached + "번)");
+            // 한 칸씩 넘기고, 가운데 모드 이름이 실제로 바뀐 것을 확인한다
+            while (current < target && !stopRequested) {
+                final String before = centeredTitle();
+                if (!scrollModePager(true)) swipeCarousel(true);
+                AccessibilityNodeInfo moved = waitFor(() -> {
+                    String t = centeredTitle();
+                    return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+                }, pick(2500, 2000, 1500));
+                if (moved == null) {
+                    // 한 번 더 손가락으로 밀어 본다
+                    swipeCarousel(true);
+                    moved = waitFor(() -> {
+                        String t = centeredTitle();
+                        return (!t.isEmpty() && !t.equals(before)) ? getRootInActiveWindow() : null;
+                    }, pick(2500, 2000, 1500));
+                }
+                if (moved == null) {
+                    log("⚠ " + (current + 1) + "번 페이지로 넘어가지 않음 (가운데 '" + before + "')");
+                    snapshot((current + 1) + "번 페이지 넘김 실패");
+                    break;
+                }
+                current++;
+                log((current) + "번 페이지로 넘김: '" + before + "' → '" + centeredTitle() + "'");
+            }
+            if (current != target) {
+                issues++;
+                failed.add(target + "번 페이지로 못 넘어감");
+                continue;
+            }
             // 넘김 애니메이션이 끝나 ▶가 화면 가운데에 자리 잡을 때까지 기다린다
             final String pidW = pid;
             AccessibilityNodeInfo play = waitFor(() -> findCenteredById(pidW), pick(3000, 2500, 2000));
@@ -704,6 +741,12 @@ public class MacroService extends AccessibilityService {
             "kr.co.ceragem.iot:id/summary_graph_body_parts_spine_indicator",
             "kr.co.ceragem.iot:id/summary_graph_body_parts_stomach_indicator",
             "kr.co.ceragem.iot:id/summary_graph_body_parts_calf_indicator"};
+
+    /** 화면 가운데 모드 페이지의 이름(예: 릴렉스 모드). */
+    private String centeredTitle() {
+        AccessibilityNodeInfo t = findCenteredById(ID_MODE_TITLE);
+        return t == null || t.getText() == null ? "" : t.getText().toString().trim();
+    }
 
     /** 아래 점(●○○)으로 지금 몇 번째 페이지인지. 모르면 -1. */
     private int currentPage() {
