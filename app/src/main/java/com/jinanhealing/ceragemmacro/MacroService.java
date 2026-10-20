@@ -730,25 +730,11 @@ public class MacroService extends AccessibilityService {
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
             log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
-            // 2번째 이후 페이지(음파 진동 등)에 '스캔 대기'·'척추 스캔중'이 보이는 건
-            // 앞 페이지(척추 코스)가 막 시작돼서 잠깐 같이 보이는 것 — 이 페이지가 작동 중인 게 아님
-            if (target > 1 && !st.isEmpty() && !st.equals("마사지대기") && !st.equals("마사지중")) {
-                final String pidS = pid, wantS = want;
-                AccessibilityNodeInfo settled = waitFor(() -> {
-                    AccessibilityNodeInfo p = findCenteredById(pidS);
-                    if (p == null) return null;
-                    String[] x = pageTexts(p);
-                    String n = norm(x[1]);
-                    return (x[0].trim().equals(wantS) && (n.equals("마사지대기") || n.equals("마사지중"))) ? p : null;
-                }, pick(5000, 4000, 3500));
-                if (settled != null) {
-                    play = settled;
-                    st = norm(pageTexts(play)[1]);
-                    log(target + "번 페이지 상태가 '" + pageTexts(play)[1] + "'로 바뀜");
-                } else {
-                    log(target + "번 페이지 상태가 계속 '" + ts[1] + "' — 작동 중이 아니므로 ▶를 누름");
-                    st = "마사지대기";
-                }
+            // 2번째 이후 페이지(음파 진동 등): '마사지 중'일 때만 작동 중으로 보고,
+            // 그 밖의 글자(마사지 대기, 앞 페이지에서 비친 스캔 대기·척추 스캔중 등)면 기다리지 않고 바로 ▶
+            if (target > 1 && !st.equals("마사지중")) {
+                if (!st.equals("마사지대기")) log(target + "번 페이지 상태 '" + ts[1] + "'는 작동 중이 아님 → 바로 ▶");
+                st = "마사지대기";
             }
             if (!st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
