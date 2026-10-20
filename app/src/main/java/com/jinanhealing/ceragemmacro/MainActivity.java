@@ -195,8 +195,8 @@ public class MainActivity extends Activity {
         reportView = text("", 14, INK, false);
         reportView.setTextIsSelectable(true);
         reportCard.addView(reportView);
-        shareIssueButton = smallButton("문제 리포트 공유");
-        shareIssueButton.setOnClickListener(v -> shareText(lastIssueReport, "세라젬 일괄조작 문제 리포트"));
+        shareIssueButton = smallButton("진행 기록 공유");
+        shareIssueButton.setOnClickListener(v -> shareText(lastIssueReport, "세라젬 일괄조작 진행 기록"));
         reportCard.addView(shareIssueButton);
 
         // 설정

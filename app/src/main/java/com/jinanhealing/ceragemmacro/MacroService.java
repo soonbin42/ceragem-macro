@@ -67,6 +67,7 @@ public class MacroService extends AccessibilityService {
     // ---- 문제 리포트(실패·앱 재실행 이유 기록)
     private final StringBuilder diag = new StringBuilder();
     private int issues = 0;
+    private int diagAlwaysSnap = 0;
     private String relaunchReason = "처음 시작";
 
     /** 속도에 따라 대기 시간을 고른다. */
@@ -211,6 +212,7 @@ public class MacroService extends AccessibilityService {
         boolean relaunch = true; // 처음 한 번만 앱을 새로 연다
         diag.setLength(0);
         issues = 0;
+        diagAlwaysSnap = 0;
         relaunchReason = "처음 시작";
         log("시작: 전체 " + modeLabel(mode) + " · 기기 " + devices + " · 속도 " + speed
                 + " · 실행 페이지 '" + c.modeName + "'");
@@ -263,10 +265,12 @@ public class MacroService extends AccessibilityService {
         String summary = "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
                 + lines;
-        if (issues > 0) {
+        if (issues == 0) {
+            MainActivity.lastIssueReport = buildReport(summary);   // 문제가 없어도 진행 기록은 공유할 수 있게
+        } else {
             String saved = saveIssueReport(summary);
             summary += "\n📝 문제 리포트 " + issues + "건 저장" + (saved != null ? " (" + saved + ")" : "")
-                    + " — 아래 '문제 리포트 공유'로 보내주세요";
+                    + " — 아래 '진행 기록 공유'로 보내주세요";
         }
         return summary;
     }
@@ -728,6 +732,10 @@ public class MacroService extends AccessibilityService {
             log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
             if (!st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
+                if (diagAlwaysSnap < 2) {   // 한 번 실행에 두 번까지만 화면 기록
+                    diagAlwaysSnap++;
+                    snapshot(label + " '이미 작동 중'으로 판단한 화면");
+                }
                 continue;
             }
             if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
@@ -741,6 +749,10 @@ public class MacroService extends AccessibilityService {
                 String now = norm(pageTexts(p)[1]);
                 return (!now.isEmpty() && !now.equals("마사지대기")) ? p : null;
             }, pick(5000, 3500, 2500));
+            {
+                AccessibilityNodeInfo pa = findCenteredById(pidF);
+                log(label + " ▶ 누른 뒤 상태: '" + (pa == null ? (isMassageRunning() ? "진행 화면" : "?") : pageTexts(pa)[1]) + "'");
+            }
             if (ok != null) started.add(label);
             else {
                 unsure.add(label);
@@ -1218,6 +1230,13 @@ public class MacroService extends AccessibilityService {
 
     private String saveIssueReport(String summary) {
         String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+        String text = buildReport(summary);
+        MainActivity.lastIssueReport = text;
+        return saveToDownloads("ceragem_report_" + ts + ".txt", text);
+    }
+
+    private String buildReport(String summary) {
+        String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         String ver = "?";
         try {
             ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
@@ -1237,9 +1256,7 @@ public class MacroService extends AccessibilityService {
         synchronized (diag) {
             r.append(diag);
         }
-        String text = r.toString();
-        MainActivity.lastIssueReport = text;
-        return saveToDownloads("ceragem_report_" + ts + ".txt", text);
+        return r.toString();
     }
 
     // ---------------------------------------------------------------- 화면 분석(덤프)
