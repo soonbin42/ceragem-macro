@@ -227,6 +227,7 @@ public class MacroService extends AccessibilityService {
         int ok = 0, skip = 0, fail = 0;
         boolean relaunch = true; // 처음 한 번만 앱을 새로 연다
         diag.setLength(0);
+        netAlerts = 0;
         issues = 0;
         diagAlwaysSnap = 0;
         relaunchReason = "처음 시작";
@@ -278,9 +279,10 @@ public class MacroService extends AccessibilityService {
         String when = new SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(new Date());
         long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
         String[] sp = {"안정", "보통", "빠름"};
+        String netNote = netAlerts > 0 ? "\n⚠ 세라젬 앱 네트워크 알림 " + netAlerts + "번 (통신 불안정) — 자동으로 닫음\n" : "";
         String summary = "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
-                + lines;
+                + lines + netNote;
         if (issues == 0) {
             MainActivity.lastIssueReport = buildReport(summary);   // 문제가 없어도 진행 기록은 공유할 수 있게
         } else {
@@ -797,6 +799,25 @@ public class MacroService extends AccessibilityService {
         return Result.ok(msg.toString());
     }
 
+    private long lastNetAlert = 0;
+    private int netAlerts = 0;
+
+    /** '네트워크 알림 — 네트워크 상태를 확인해주세요' 창이 떠 있으면 확인을 눌러 닫는다. 닫았으면 true. */
+    private boolean dismissNetworkAlert() {
+        long now = System.currentTimeMillis();
+        if (now - lastNetAlert < 700) return false;          // 너무 자주 검사하지 않음
+        AccessibilityNodeInfo msg = textContaining("네트워크 상태를 확인");
+        if (msg == null) return false;
+        lastNetAlert = now;
+        netAlerts++;
+        AccessibilityNodeInfo okBtn = visibleText("확인");
+        log("⚠ 네트워크 알림 창 (" + netAlerts + "번째) — 확인 누름");
+        if (okBtn != null) clickNode(okBtn);
+        else performGlobalAction(GLOBAL_ACTION_BACK);
+        sleep(pick(1500, 1200, 1000));   // 세라젬 앱이 다시 연결할 시간
+        return true;
+    }
+
     /** 화면에 보이는 글자 중 일부가 들어간 것. */
     private AccessibilityNodeInfo textContaining(String part) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -812,15 +833,7 @@ public class MacroService extends AccessibilityService {
      * 연결 해제면 '연결하기'를 한 번 눌러 보고, 그래도 안 되면 기기 상태 실패로 돌려준다.
      */
     private Result checkDisconnected() {
-        AccessibilityNodeInfo net = textContaining("네트워크 상태를 확인");
-        if (net != null) {
-            log("네트워크 알림 창 — 확인 누름");
-            snapshot("네트워크 알림");
-            AccessibilityNodeInfo okBtn = visibleText("확인");
-            if (okBtn != null) clickNode(okBtn);
-            sleep(800);
-            return Result.fail("네트워크 알림 — 세라젬 서버 연결 확인 필요");
-        }
+        dismissNetworkAlert();
         if (textContaining("연결이 해제") == null) return null;
         log("기기 연결 해제 화면 — '연결하기' 시도");
         snapshot("기기 연결 해제");
@@ -1011,8 +1024,10 @@ public class MacroService extends AccessibilityService {
 
     /** 기기 화면에서 뒤로 가서 목록이 다시 보이면 true. */
     private boolean returnToList(Config c) {
+        dismissNetworkAlert();
         if (isListScreen(c)) return true;
         for (int i = 0; i < 3 && !stopRequested; i++) {
+            if (dismissNetworkAlert() && isListScreen(c)) return true;
             performGlobalAction(GLOBAL_ACTION_BACK);
             AccessibilityNodeInfo list = waitFor(() -> isListScreen(c) ? getRootInActiveWindow() : null, 2000);
             if (list != null) return true;
@@ -1030,14 +1045,7 @@ public class MacroService extends AccessibilityService {
     }
 
     private void dismissPopups() {
-        if (textContaining("네트워크 상태를 확인") != null) {
-            log("목록 화면 네트워크 알림 — 확인 누름");
-            AccessibilityNodeInfo okBtn = visibleText("확인");
-            if (okBtn != null) {
-                clickNode(okBtn);
-                sleep(500);
-            }
-        }
+        dismissNetworkAlert();
         String[] labels = {"오늘 하루 보지 않기", "다시 보지 않기", "닫기"};
         for (String l : labels) {
             AccessibilityNodeInfo n = findExactText(l);
@@ -1370,6 +1378,8 @@ public class MacroService extends AccessibilityService {
     private AccessibilityNodeInfo waitFor(Finder f, long timeoutMs) {
         long end = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < end && !stopRequested) {
+            // 세라젬 앱 통신이 불안정할 때 언제든 뜨는 '네트워크 알림' 창은 바로 닫고 계속 기다린다
+            if (dismissNetworkAlert()) end += 3000;
             AccessibilityNodeInfo n = null;
             try {
                 n = f.find();
