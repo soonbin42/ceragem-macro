@@ -300,11 +300,11 @@ public class MacroService extends AccessibilityService {
 
         String status = collectText(card);
         log("목록 카드: " + clean(status));
+        // 목록의 상태 글자는 앱을 막 열었을 때 '사용 가능'으로 먼저 나왔다가 늦게 '(전원 꺼짐)'으로 바뀐다.
+        // 그래서 '전원 꺼짐'만 믿고, 켜짐 여부는 기기 화면에서 판단한다.
         boolean off = status.contains("전원 꺼짐");
-        boolean usable = status.contains("사용 가능");
         if (mode == MODE_ON) {
-            if (!off && usable) return Result.skip("이미 켜져 있음");
-            if (!off) return Result.fail("상태 확인 불가 (" + clean(status) + ")");
+            // 목록만 보고 '이미 켜짐'으로 건너뛰지 않는다
         } else if (mode == MODE_OFF) {
             if (off) return Result.skip("이미 꺼져 있음");
         } else {
@@ -322,11 +322,35 @@ public class MacroService extends AccessibilityService {
             if (n == null) n = findById(ID_DETAIL_BACK);
             return n;
         }, 12000);
-        if (detail == null) return Result.fail("기기 화면이 열리지 않음");
+        if (detail == null) {
+            Result lost = checkDisconnected();
+            if (lost != null) return lost;
+            return Result.fail("기기 화면이 열리지 않음");
+        }
         log("기기 화면 열림 (" + detail.getViewIdResourceName() + ")");
+        {
+            Result lost = checkDisconnected();
+            if (lost != null) return lost;
+        }
+        // 실행·모드 변경: 기기 화면이 '전원을 켜 주세요'면 꺼진 것(목록 글자가 늦게 바뀐 경우)
+        if (mode != MODE_ON && mode != MODE_OFF) {
+            sleep(pick(500, 300, 150));
+            if (visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null) {
+                return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
+            }
+        }
 
         if (mode == MODE_ON) {
-            sleep(pick(800, 400, 150));
+            // 화면 내용이 다 뜰 때까지: 가운데 전원(꺼짐) 또는 오른쪽 위 전원(켜짐)이 보일 때까지 기다린다
+            waitFor(() -> {
+                AccessibilityNodeInfo a1 = findById(c.powerId);
+                if (a1 != null && a1.isVisibleToUser()) return a1;
+                AccessibilityNodeInfo a2 = findById(ID_POWER_OFF);
+                if (a2 != null && a2.isVisibleToUser()) return a2;
+                return textContaining("켜는 중");
+            }, 3000);
+            sleep(pick(500, 250, 100));
+            if (textContaining("켜는 중") != null) return Result.skip("이미 켜는 중");
             AccessibilityNodeInfo power = findById(c.powerId);
             if (power == null && visibleText("전원을 켜 주세요") == null && visibleText("전원을 켜주세요") == null) {
                 return Result.skip("이미 켜져 있음");
@@ -337,9 +361,11 @@ public class MacroService extends AccessibilityService {
             AccessibilityNodeInfo on = waitFor(() -> {
                 AccessibilityNodeInfo b = findById(ID_POWER_OFF);
                 boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
-                return (b != null && b.isVisibleToUser() && !msg) ? b : null;
+                if (b != null && b.isVisibleToUser() && !msg) return b;
+                return textContaining("켜는 중");     // '전원을 켜는 중입니다' — 켜지는 중
             }, pick(5000, 4000, 3000));
-            if (on != null) return Result.ok("켰음");
+            if (on != null) return Result.ok(on.getViewIdResourceName() != null && on.getViewIdResourceName().endsWith("do_power_off")
+                    ? "켰음" : "켜는 중");
             issues++;
             log("전원 버튼을 눌렀지만 켜진 화면이 확인되지 않음");
             snapshot("켜기 확인 실패");
@@ -771,6 +797,47 @@ public class MacroService extends AccessibilityService {
         return Result.ok(msg.toString());
     }
 
+    /** 화면에 보이는 글자 중 일부가 들어간 것. */
+    private AccessibilityNodeInfo textContaining(String part) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(part);
+        if (found == null) return null;
+        for (AccessibilityNodeInfo n : found) if (n.isVisibleToUser()) return n;
+        return null;
+    }
+
+    /**
+     * '기기와 연결이 해제 되었습니다'(다른 폰이 연결 중이거나 통신 끊김) 또는 '네트워크 알림' 창 처리.
+     * 연결 해제면 '연결하기'를 한 번 눌러 보고, 그래도 안 되면 기기 상태 실패로 돌려준다.
+     */
+    private Result checkDisconnected() {
+        AccessibilityNodeInfo net = textContaining("네트워크 상태를 확인");
+        if (net != null) {
+            log("네트워크 알림 창 — 확인 누름");
+            snapshot("네트워크 알림");
+            AccessibilityNodeInfo okBtn = visibleText("확인");
+            if (okBtn != null) clickNode(okBtn);
+            sleep(800);
+            return Result.fail("네트워크 알림 — 세라젬 서버 연결 확인 필요");
+        }
+        if (textContaining("연결이 해제") == null) return null;
+        log("기기 연결 해제 화면 — '연결하기' 시도");
+        snapshot("기기 연결 해제");
+        AccessibilityNodeInfo btn = visibleText("연결하기");
+        if (btn != null) {
+            clickNode(btn);
+            AccessibilityNodeInfo back = waitFor(() -> textContaining("연결이 해제") == null
+                    && (findById(ID_POWER_OFF) != null || findById(Config.DEFAULT_POWER_ID) != null)
+                    ? getRootInActiveWindow() : null, 8000);
+            if (back != null) {
+                log("다시 연결됨");
+                return null;
+            }
+        }
+        return Result.fail("기기 연결 끊김 (다른 폰이 연결 중이거나 통신 문제)").expected();
+    }
+
     /** 모드 넘기기를 맨 앞 페이지로 되돌리고 이름이 자리 잡을 때까지 기다린다. */
     private void goToFirstPage() {
         waitFor(() -> centeredTitle().isEmpty() ? null : getRootInActiveWindow(), 3000);
@@ -963,6 +1030,14 @@ public class MacroService extends AccessibilityService {
     }
 
     private void dismissPopups() {
+        if (textContaining("네트워크 상태를 확인") != null) {
+            log("목록 화면 네트워크 알림 — 확인 누름");
+            AccessibilityNodeInfo okBtn = visibleText("확인");
+            if (okBtn != null) {
+                clickNode(okBtn);
+                sleep(500);
+            }
+        }
         String[] labels = {"오늘 하루 보지 않기", "다시 보지 않기", "닫기"};
         for (String l : labels) {
             AccessibilityNodeInfo n = findExactText(l);
