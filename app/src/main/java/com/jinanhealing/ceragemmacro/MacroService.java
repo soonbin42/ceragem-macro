@@ -313,17 +313,28 @@ public class MacroService extends AccessibilityService {
             if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
         }
 
-        if (!clickNode(card)) return Result.fail("기기 카드를 누르지 못함");
-
-        // 기기 화면이 열렸는지: 꺼진 화면(가운데 전원) 또는 켜진 화면(오른쪽 위 전원·▶·뒤로) 중 하나
-        AccessibilityNodeInfo detail = waitFor(() -> {
-            AccessibilityNodeInfo n = findById(c.powerId);
-            if (n == null) n = findById(ID_POWER_OFF);
-            if (n == null) n = findById(ID_PLAY);
-            if (n == null) n = findById(ID_DETAIL_PAGES);
-            if (n == null) n = findById(ID_DETAIL_BACK);
-            return n;
-        }, 12000);
+        // 기기 화면이 열렸는지: 꺼진 화면(가운데 전원) 또는 켜진 화면(오른쪽 위 전원·▶·뒤로) 중 하나.
+        // 네트워크 알림 창이 터치를 가로채면 목록에 그대로 있으므로 카드를 다시 누른다(최대 3번).
+        AccessibilityNodeInfo detail = null;
+        for (int attempt = 1; attempt <= 3 && detail == null && !stopRequested; attempt++) {
+            if (attempt > 1) {
+                if (!isListScreen(c)) break;
+                AccessibilityNodeInfo again = findExactText(name);
+                if (again == null) break;
+                card = containerOf(again);
+                log("기기 화면이 안 열려 카드 다시 누름 (" + attempt + "번째)");
+            }
+            if (!clickNode(card)) return Result.fail("기기 카드를 누르지 못함");
+            detail = waitFor(() -> {
+                AccessibilityNodeInfo n = findById(c.powerId);
+                if (n == null) n = findById(ID_POWER_OFF);
+                if (n == null) n = findById(ID_PLAY);
+                if (n == null) n = findById(ID_DETAIL_PAGES);
+                if (n == null) n = findById(ID_DETAIL_BACK);
+                if (n == null) n = textContaining("연결이 해제");
+                return n;
+            }, attempt < 3 ? 5000 : 8000);
+        }
         if (detail == null) {
             Result lost = checkDisconnected();
             if (lost != null) return lost;
@@ -396,8 +407,10 @@ public class MacroService extends AccessibilityService {
             confirmDialogIfAny();
             AccessibilityNodeInfo done = waitFor(() -> {
                 AccessibilityNodeInfo a = visibleText("전원을 켜 주세요");
-                return a != null ? a : visibleText("전원을 켜주세요");
-            }, pick(5000, 4000, 3000));
+                if (a == null) a = visibleText("전원을 켜주세요");
+                if (a == null) a = textContaining("끄는 중");
+                return a;
+            }, pick(7000, 6000, 5000));
             return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
         if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) return changeSpineMode(c);
@@ -1028,8 +1041,22 @@ public class MacroService extends AccessibilityService {
         if (isListScreen(c)) return true;
         for (int i = 0; i < 3 && !stopRequested; i++) {
             if (dismissNetworkAlert() && isListScreen(c)) return true;
-            performGlobalAction(GLOBAL_ACTION_BACK);
-            AccessibilityNodeInfo list = waitFor(() -> isListScreen(c) ? getRootInActiveWindow() : null, 2000);
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            // 세라젬 앱 밖(홈 화면 등)이면 더 누르지 않는다 — 다음 기기에서 앱을 새로 연다
+            if (root == null || root.getPackageName() == null
+                    || !Config.TARGET_PKG.contentEquals(root.getPackageName())) {
+                log("세라젬 앱 밖으로 나가 있음 — 뒤로가기 중단");
+                return false;
+            }
+            // 앱 안의 ← 버튼을 먼저 쓰고, 없으면 시스템 뒤로가기
+            AccessibilityNodeInfo backBtn = findById(ID_DETAIL_BACK);
+            if (backBtn != null && backBtn.isVisibleToUser() && backBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                // ok
+            } else {
+                performGlobalAction(GLOBAL_ACTION_BACK);
+            }
+            // 목록이 다시 그려지는 데 통신 때문에 시간이 걸릴 수 있어 넉넉히 기다린다
+            AccessibilityNodeInfo list = waitFor(() -> isListScreen(c) ? getRootInActiveWindow() : null, 3500);
             if (list != null) return true;
         }
         return false;
