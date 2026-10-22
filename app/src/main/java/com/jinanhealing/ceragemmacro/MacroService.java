@@ -761,10 +761,29 @@ public class MacroService extends AccessibilityService {
             log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
             // 2번째 이후 페이지(음파 진동 등): '마사지 중'일 때만 작동 중으로 보고,
             // 그 밖의 글자(마사지 대기, 앞 페이지에서 비친 스캔 대기·척추 스캔중 등)면 기다리지 않고 바로 ▶
-            if (target > 1 && !st.equals("마사지중")) {
-                if (!st.equals("마사지대기")) log(target + "번 페이지 상태 '" + ts[1] + "'는 작동 중이 아님 → 바로 ▶");
-                st = "마사지대기";
+            if (target > 1 && !st.equals("마사지중") && !st.equals("마사지대기")) {
+                // 앞 페이지의 '스캔 대기'가 비친 상태에서는 ▶가 먹지 않는다(10/22 기록: 03·08·09).
+                // 고정 대기가 아니라 '마사지 대기'로 바뀌는 즉시 넘어간다.
+                final String pidS = pid, wantS = want;
+                long t0 = System.currentTimeMillis();
+                AccessibilityNodeInfo settled = waitFor(() -> {
+                    AccessibilityNodeInfo p = findCenteredById(pidS);
+                    if (p == null) return null;
+                    String[] x = pageTexts(p);
+                    String n = norm(x[1]);
+                    return (x[0].trim().equals(wantS) && (n.equals("마사지대기") || n.equals("마사지중"))) ? p : null;
+                }, 4000);
+                if (settled != null) {
+                    play = settled;
+                    st = norm(pageTexts(play)[1]);
+                    log(target + "번 페이지 '" + ts[1] + "' → '" + pageTexts(play)[1] + "' ("
+                            + (System.currentTimeMillis() - t0) + "ms)");
+                } else {
+                    log(target + "번 페이지가 계속 '" + ts[1] + "' — 그대로 ▶");
+                    st = "마사지대기";
+                }
             }
+            if (target > 1 && !st.equals("마사지중")) st = "마사지대기";
             if (!st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
                 if (diagAlwaysSnap < 2) {   // 한 번 실행에 두 번까지만 화면 기록
@@ -788,6 +807,21 @@ public class MacroService extends AccessibilityService {
             {
                 AccessibilityNodeInfo pa = findCenteredById(pidF);
                 log(label + " ▶ 누른 뒤 상태: '" + (pa == null ? (isMassageRunning() ? "진행 화면" : "?") : pageTexts(pa)[1]) + "'");
+                // 확인이 안 됐고 지금 화면이 분명히 '마사지 대기'(작동 안 함)이면 한 번 더 누른다 — 멈출 위험 없음
+                if (ok == null && pa != null && norm(pageTexts(pa)[1]).equals("마사지대기")
+                        && pageTexts(pa)[0].trim().equals(want) && !stopRequested) {
+                    log(label + " 아직 '마사지 대기' → ▶ 한 번 더");
+                    if (!pa.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(pa);
+                    ok = waitFor(() -> {
+                        AccessibilityNodeInfo p = findCenteredById(pidF);
+                        if (p == null) return isMassageRunning() ? getRootInActiveWindow() : null;
+                        String now = norm(pageTexts(p)[1]);
+                        if (target > 1 && now.contains("스캔")) return null;
+                        return (!now.isEmpty() && !now.equals("마사지대기")) ? p : null;
+                    }, pick(5000, 3500, 2500));
+                    AccessibilityNodeInfo pb = findCenteredById(pidF);
+                    log(label + " 두 번째 ▶ 뒤 상태: '" + (pb == null ? "?" : pageTexts(pb)[1]) + "'");
+                }
             }
             if (ok != null) started.add(label);
             else {
