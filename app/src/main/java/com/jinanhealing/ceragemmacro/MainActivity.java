@@ -129,14 +129,6 @@ public class MainActivity extends Activity {
         sub.setPadding(0, dp(4), 0, dp(14));
         root.addView(sub);
 
-        // 접근성 상태
-        LinearLayout statusRow = card(root);
-        statusView = text("", 15, INK, true);
-        statusRow.addView(statusView);
-        a11yButton = smallButton("접근성 설정 열기");
-        a11yButton.setOnClickListener(v -> openA11ySettings());
-        statusRow.addView(a11yButton);
-
         // 정사각형 버튼 2×2
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
@@ -166,6 +158,16 @@ public class MainActivity extends Activity {
         devCard.addView(selRow);
 
 
+        // 결과
+        root.addView(section("최근 결과"));
+        LinearLayout reportCard = card(root);
+        reportView = text("", 14, INK, false);
+        reportView.setTextIsSelectable(true);
+        reportCard.addView(reportView);
+        shareIssueButton = smallButton("진행 기록 공유");
+        shareIssueButton.setOnClickListener(v -> shareText(lastIssueReport, "세라젬 일괄조작 진행 기록"));
+        reportCard.addView(shareIssueButton);
+
         // 속도
         root.addView(section("속도"));
         LinearLayout speedCard = card(root);
@@ -190,16 +192,6 @@ public class MainActivity extends Activity {
         speedCard.addView(rg);
         speedCard.addView(text("빠름에서 일부 기기가 안 켜지면 보통이나 안정으로 바꿔 보세요.", 13, MUTED, false));
 
-        // 결과
-        root.addView(section("최근 결과"));
-        LinearLayout reportCard = card(root);
-        reportView = text("", 14, INK, false);
-        reportView.setTextIsSelectable(true);
-        reportCard.addView(reportView);
-        shareIssueButton = smallButton("진행 기록 공유");
-        shareIssueButton.setOnClickListener(v -> shareText(lastIssueReport, "세라젬 일괄조작 진행 기록"));
-        reportCard.addView(shareIssueButton);
-
         // 설정
         root.addView(section("설정"));
         LinearLayout setCard = card(root);
@@ -214,7 +206,14 @@ public class MainActivity extends Activity {
         save.setOnClickListener(v -> saveFromUi(true));
         setCard.addView(save);
 
-        // 화면 분석
+        // 접근성 상태
+        LinearLayout statusRow = card(root);
+        statusView = text("", 15, INK, true);
+        statusRow.addView(statusView);
+        a11yButton = smallButton("접근성 설정 열기");
+        a11yButton.setOnClickListener(v -> openA11ySettings());
+        statusRow.addView(a11yButton);
+
         // 실패 기록 모음
         root.addView(section("실패 기록 모음"));
         LinearLayout histCard = card(root);
@@ -242,6 +241,7 @@ public class MainActivity extends Activity {
         histRow.addView(histClear);
         histCard.addView(histRow);
 
+        // 화면 분석
         root.addView(section("화면 분석 (문제 생겼을 때)"));
         LinearLayout dumpCard = card(root);
         dumpCard.addView(text("버튼을 누르고 10초 안에 세라젬 앱의 확인하고 싶은 화면(목록 또는 기기 화면)을 띄워 두세요. 화면 구조가 Download 폴더에 저장되고, 아래 공유 버튼으로 보낼 수 있어요.", 13, MUTED, false));
