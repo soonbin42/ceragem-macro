@@ -368,11 +368,18 @@ public class MacroService extends AccessibilityService {
             }, 3000);
             sleep(pick(500, 250, 100));
             if (textContaining("켜는 중") != null) return Result.skip("이미 켜는 중");
+            // findById는 화면에 안 보이는 버튼도 돌려줄 수 있다 → 켜진 기기에서 숨은 버튼을 눌러 꺼 버리지 않도록
+            // '보이는' 가운데 전원 버튼일 때만 누른다
             AccessibilityNodeInfo power = findById(c.powerId);
-            if (power == null && visibleText("전원을 켜 주세요") == null && visibleText("전원을 켜주세요") == null) {
-                return Result.skip("이미 켜져 있음");
+            if (power != null && !power.isVisibleToUser()) power = null;
+            boolean offMsg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
+            AccessibilityNodeInfo onBtn = findById(ID_POWER_OFF);
+            boolean onScreen = onBtn != null && onBtn.isVisibleToUser();
+            if (power == null && !offMsg) {
+                return onScreen ? Result.skip("이미 켜져 있음") : Result.fail("기기 상태를 확인하지 못함");
             }
             if (power == null) return Result.fail("가운데 전원 버튼을 찾지 못함");
+            if (onScreen && !offMsg) return Result.skip("이미 켜져 있음");
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
             // 켜지면 오른쪽 위 전원 버튼이 생기고 '전원을 켜 주세요'가 사라진다
             AccessibilityNodeInfo on = waitFor(() -> {
@@ -682,9 +689,15 @@ public class MacroService extends AccessibilityService {
     private Result runPages(Config c, List<String> pageList) {
         List<Integer> pages = new ArrayList<>();
         for (String s : pageList) {
-            int n = Integer.parseInt(s);
-            if (n >= 1 && !pages.contains(n)) pages.add(n);
+            int n;
+            try {
+                n = Integer.parseInt(s);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (n >= 1 && n <= 5 && !pages.contains(n)) pages.add(n);
         }
+        if (pages.isEmpty()) return Result.fail("실행할 페이지 번호가 잘못됨 (설정 확인)");
         java.util.Collections.sort(pages);
         String pid = (c.playId == null || c.playId.trim().isEmpty()) ? ID_PLAY : c.playId.trim();
 

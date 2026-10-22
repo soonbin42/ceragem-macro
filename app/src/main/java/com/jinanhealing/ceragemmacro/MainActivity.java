@@ -317,7 +317,9 @@ public class MainActivity extends Activity {
         cfg.count = count;
         String p = prefixEdit.getText().toString().trim();
         if (!p.isEmpty()) cfg.prefix = p;
-        cfg.modeName = modeEdit.getText().toString().trim();
+        String mn = modeEdit.getText().toString().trim();
+        cfg.modeName = mn.isEmpty() ? "1, 2" : mn;     // 비워 두면 기본(척추 + 음파 진동)
+        if (mn.isEmpty()) modeEdit.setText(cfg.modeName);
         cfg.playId = playIdEdit.getText().toString().trim();
         String cm = changeEdit.getText().toString().trim();
         cfg.changeModeName = cm.isEmpty() ? "릴렉스 모드" : cm;

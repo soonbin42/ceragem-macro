@@ -38,6 +38,7 @@ public class Config {
             String m = c.modeName.replaceAll("\\s+", "");
             if (m.equals("음파진동마사지1") || m.equals("릴렉스모드,음파진동마사지1")) c.modeName = "1, 2";
         }
+        if (c.modeName == null || c.modeName.trim().isEmpty()) c.modeName = "1, 2";
         c.playId = p.getString("playId", "");
         c.changeModeName = p.getString("changeModeName", c.changeModeName);
         c.changeModeNo = p.getString("changeModeNo", c.changeModeNo);
