@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     private EditText countEdit, prefixEdit, modeEdit, playIdEdit, changeEdit, changeNoEdit, changeSpeedEdit;
     private TextView reportView;
     private Button shareDumpButton, shareIssueButton;
+    private TextView histInfo;
     private Config cfg;
 
     @Override
@@ -214,6 +215,33 @@ public class MainActivity extends Activity {
         setCard.addView(save);
 
         // 화면 분석
+        // 실패 기록 모음
+        root.addView(section("실패 기록 모음"));
+        LinearLayout histCard = card(root);
+        histInfo = text("", 14, INK, false);
+        histCard.addView(histInfo);
+        histCard.addView(text("실패·확인 안 됨·앱 재실행·네트워크 알림이 있었던 실행만 자동으로 쌓여요. 공유하면 맨 위에 기기별·원인별 횟수가 정리돼요.", 13, MUTED, false));
+        LinearLayout histRow = new LinearLayout(this);
+        histRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button histShare = smallButton("실패 기록 공유");
+        histShare.setOnClickListener(v -> {
+            String h = FailHistory.withSummary(this);
+            if (h.isEmpty()) Toast.makeText(this, "아직 쌓인 실패 기록이 없어요", Toast.LENGTH_SHORT).show();
+            else shareText(h, "세라젬 일괄조작 실패 기록 모음");
+        });
+        Button histClear = smallButton("기록 지우기");
+        histClear.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
+                .setMessage("실패 기록을 모두 지울까요?")
+                .setPositiveButton("지우기", (d, w) -> {
+                    FailHistory.clear(this);
+                    refresh();
+                })
+                .setNegativeButton("취소", null)
+                .show());
+        histRow.addView(histShare);
+        histRow.addView(histClear);
+        histCard.addView(histRow);
+
         root.addView(section("화면 분석 (문제 생겼을 때)"));
         LinearLayout dumpCard = card(root);
         dumpCard.addView(text("버튼을 누르고 10초 안에 세라젬 앱의 확인하고 싶은 화면(목록 또는 기기 화면)을 띄워 두세요. 화면 구조가 Download 폴더에 저장되고, 아래 공유 버튼으로 보낼 수 있어요.", 13, MUTED, false));
@@ -246,6 +274,8 @@ public class MainActivity extends Activity {
         reportView.setText(r == null ? "아직 실행 기록이 없어요." : r);
         shareDumpButton.setVisibility(lastDump == null ? View.GONE : View.VISIBLE);
         shareIssueButton.setVisibility(lastIssueReport == null ? View.GONE : View.VISIBLE);
+        int hc = FailHistory.count(this);
+        histInfo.setText(hc == 0 ? "쌓인 실패 기록 없음" : "쌓인 실패 기록 " + hc + "회");
     }
 
     private void rebuildGrid() {

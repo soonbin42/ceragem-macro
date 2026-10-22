@@ -242,7 +242,9 @@ public class MacroService extends AccessibilityService {
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
             log("── " + name);
             Result r = doDevice(c, mode, name, relaunch);
-            if (r.kind == Result.FAIL && r.expected) {
+            if (r.kind == Result.FAIL && stopRequested) {
+                log("⏹ 중지 요청으로 멈춤: " + r.msg);
+            } else if (r.kind == Result.FAIL && r.expected) {
                 log("❌ " + r.msg + " (기기 상태라 재시도 안 함)");
             } else if (r.kind == Result.FAIL) {
                 issues++;
@@ -283,6 +285,8 @@ public class MacroService extends AccessibilityService {
         String summary = "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
                 + lines + netNote;
+        boolean problem = fail > 0 || issues > 0 || netAlerts > 0 || lines.indexOf("확인 안 됨") >= 0;
+        if (problem) recordFailHistory(mode, when, secs, lines.toString());
         if (issues == 0) {
             MainActivity.lastIssueReport = buildReport(summary);   // 문제가 없어도 진행 기록은 공유할 수 있게
         } else {
@@ -1328,6 +1332,47 @@ public class MacroService extends AccessibilityService {
         }
     }
 
+    /** 문제가 있었던 실행만 요약해서 실패 기록 모음에 쌓는다(화면 기록은 빼고 핵심 줄만). */
+    private void recordFailHistory(int mode, String when, long secs, String resultLines) {
+        String ver = "?";
+        try {
+            ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+        StringBuilder b = new StringBuilder();
+        b.append("[").append(when).append("] 전체 ").append(modeLabel(mode)).append(" · ").append(secs)
+                .append("초 · v").append(ver).append('\n');
+        for (String line : resultLines.split("\n")) {
+            if (line.startsWith("❌ ")) b.append(line).append('\n');
+            else if (line.contains("확인 안 됨")) b.append("❔ ").append(line.substring(line.indexOf(' ') + 1)).append('\n');
+            else if (line.startsWith("⏹")) b.append(line).append('\n');
+        }
+        if (netAlerts > 0) b.append("네트워크 알림 ").append(netAlerts).append("번\n");
+        String d;
+        synchronized (diag) {
+            d = diag.toString();
+        }
+        StringBuilder key = new StringBuilder();
+        String device = "";
+        for (String line : d.split("\n")) {
+            if (line.startsWith("    ")) continue;                 // 화면 기록은 뺀다
+            int sp = line.indexOf("  ");
+            String body = sp > 0 ? line.substring(sp + 2) : line;
+            if (body.startsWith("── ")) {
+                device = body.substring(3);
+                continue;
+            }
+            if (body.contains("❌") || body.contains("⚠") || body.contains("확인 안 됨") || body.contains("다시 누름")
+                    || body.contains("한 번 더") || body.contains("연결") || body.contains("못 ")
+                    || (body.startsWith("세라젬 앱 새로 열기") && !body.contains("처음 시작"))) {
+                key.append("  · ").append(line.substring(0, Math.max(0, sp))).append(' ')
+                        .append(device.isEmpty() ? "" : device + ": ").append(body).append('\n');
+            }
+        }
+        if (key.length() > 0) b.append("상세:\n").append(key);
+        FailHistory.append(this, b.toString().trim());
+    }
+
     private String saveIssueReport(String summary) {
         String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         String text = buildReport(summary);
@@ -1438,9 +1483,13 @@ public class MacroService extends AccessibilityService {
 
     private AccessibilityNodeInfo waitFor(Finder f, long timeoutMs) {
         long end = System.currentTimeMillis() + timeoutMs;
+        int extended = 0;
         while (System.currentTimeMillis() < end && !stopRequested) {
-            // 세라젬 앱 통신이 불안정할 때 언제든 뜨는 '네트워크 알림' 창은 바로 닫고 계속 기다린다
-            if (dismissNetworkAlert()) end += 3000;
+            // 세라젬 앱 통신이 불안정할 때 언제든 뜨는 '네트워크 알림' 창은 바로 닫고 계속 기다린다(연장은 3번까지)
+            if (dismissNetworkAlert() && extended < 3) {
+                end += 3000;
+                extended++;
+            }
             AccessibilityNodeInfo n = null;
             try {
                 n = f.find();
