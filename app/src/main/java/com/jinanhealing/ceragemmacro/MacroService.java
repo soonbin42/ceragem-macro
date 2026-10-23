@@ -727,18 +727,7 @@ public class MacroService extends AccessibilityService {
         log("목록 카드: " + clean(status));
         if (isNetDown(status)) {
             // 목록에 '네트워크 연결안됨' — 이 상태에서 기기 화면을 열면 엉뚱한 버튼을 누르게 된다.
-            // 잠깐 기다려 글자가 바뀌는지 보고, 그대로면 세라젬 앱을 다시 열어 확인한다.
-            log("⚠ 목록에 '네트워크 연결안됨' — 잠깐 기다려 봄");
-            AccessibilityNodeInfo up = waitCardNetUp(name, 5000);
-            if (up == null && !stopRequested) {
-                log("⚠ 계속 연결안됨 — 세라젬 앱을 다시 열어 확인");
-                issues++;
-                relaunchReason = name + " 네트워크 연결안됨";
-                if (launchTarget()) {
-                    AccessibilityNodeInfo fresh = findCard(c, name, true);
-                    if (fresh != null) up = isNetDown(collectText(fresh)) ? waitCardNetUp(name, 6000) : fresh;
-                }
-            }
+            AccessibilityNodeInfo up = recoverNetDown(c, name);
             if (stopRequested) return Result.fail("중지됨");
             if (up == null) return Result.fail("네트워크 연결안됨 — 기기와 연결되지 않아 건드리지 않음").expected();
             card = up;
@@ -1727,6 +1716,45 @@ public class MacroService extends AccessibilityService {
     }
 
     // ---------------------------------------------------------------- 세라젬 화면 조작
+
+    /**
+     * '네트워크 연결안됨'에서 회복 시도 (바로 시작): 앱 재실행 → 3초 기다림 → 기기에 들어갔다 나옴 → 3초 기다림
+     * → 앱 재실행 → 5초 기다림. 회복되면 그 기기의 목록 카드를, 끝내 안 되면 null.
+     */
+    private AccessibilityNodeInfo recoverNetDown(Config c, String name) {
+        issues++;
+        for (int round = 1; round <= 2 && !stopRequested; round++) {
+            log("⚠ 목록에 '네트워크 연결안됨' — 세라젬 앱을 다시 엶 (" + round + "/2)");
+            relaunchReason = name + " 네트워크 연결안됨";
+            if (launchTarget()) {
+                AccessibilityNodeInfo fresh = findCard(c, name, true);
+                if (fresh != null) {
+                    AccessibilityNodeInfo up = isNetDown(collectText(fresh)) ? waitCardNetUp(name, round == 1 ? 3000 : 5000) : fresh;
+                    if (up != null) return up;
+                }
+            }
+            if (round == 2 || stopRequested) break;
+            // 기기 화면에 한 번 들어갔다 나오면 다시 연결되는 경우가 있다
+            log("⚠ 아직 연결안됨 — 기기 화면에 들어갔다 나와 봄");
+            AccessibilityNodeInfo t = findExactText(name);
+            if (t != null && clickNode(containerOf(t))) {
+                waitFor(() -> {
+                    AccessibilityNodeInfo n = findById(c.powerId);
+                    if (n == null) n = findById(ID_POWER_OFF);
+                    if (n == null) n = findById(ID_PLAY);
+                    if (n == null) n = findById(ID_DETAIL_PAGES);
+                    if (n == null) n = findById(ID_DETAIL_BACK);
+                    if (n == null) n = textContaining("연결이 해제");
+                    return n;
+                }, 3000);
+                checkDisconnected();     // '연결이 해제' 화면이면 '연결하기'를 눌러 본다
+            }
+            returnToList(c);
+            AccessibilityNodeInfo up = waitCardNetUp(name, 3000);
+            if (up != null) return up;
+        }
+        return null;
+    }
 
     private static boolean isNetDown(String listText) {
         if (listText == null) return false;
