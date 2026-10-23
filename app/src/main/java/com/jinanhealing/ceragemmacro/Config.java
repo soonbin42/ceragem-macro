@@ -46,8 +46,10 @@ public class Config {
     public Set<Integer> diffDevs = new TreeSet<>();
     /** '실행'을 누른 시각(ms). 0이면 없음 */
     public long runStartedAt = 0;
-    /** 모드 변경으로 마지막에 보낸 속도: -1 없음 · 0 저속 · 1 정속 · 2 고속 */
+    /** '모드 변경'으로 골라 둔 속도(실행을 누를 때 적용): -1 없음 · 0 저속 · 1 정속 · 2 고속 */
     public int lastSpeedIdx = -1;
+    /** 기기별로 마지막에 적용한 속도(0~2). 없으면 아직 모름 → 골라 둔 속도와 다를 때만 바꾼다. */
+    public Map<Integer, Integer> devSpeed = new TreeMap<>();
 
     private static SharedPreferences prefs(Context ctx) {
         return ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE);
@@ -85,6 +87,7 @@ public class Config {
         c.status = parseStatus(p.getString("status", ""));
         c.runStartedAt = p.getLong("runStartedAt", 0);
         c.lastSpeedIdx = p.getInt("lastSpeedIdx", -1);
+        c.devSpeed = parseStatus(p.getString("devSpeed", ""));
         return c;
     }
 
@@ -140,6 +143,27 @@ public class Config {
         return v == null ? 0 : v;
     }
 
+    /** 이 기기에 마지막으로 적용한 속도. 모르면 -1. */
+    public int devSpeedOf(int dev) {
+        Integer v = devSpeed.get(dev);
+        return v == null ? -1 : v;
+    }
+
+    /** '수정 사항 적용'이 이 기기에 할 일을 짧은 글로. (MacroService.doApply와 같은 규칙) */
+    public String planText(int dev) {
+        boolean sp = selSpine.contains(dev), ab = selAbd.contains(dev);
+        boolean bsp = baseSpine.contains(dev), bab = baseAbd.contains(dev);
+        if (!sp && !ab) return "전원 끄기";
+        if (bsp && !sp) return "전원 끄기 → 켜기 → 복부만 실행";
+        List<String> parts = new ArrayList<>();
+        if (bab && !ab) parts.add("복부 멈춤");
+        List<String> run = new ArrayList<>();
+        if (sp && !bsp) run.add("척추");
+        if (ab && !bab) run.add("복부");
+        if (!run.isEmpty()) parts.add(String.join("·", run) + " 실행");
+        return parts.isEmpty() ? "변경 없음" : String.join(" + ", parts);
+    }
+
     public String deviceName(int i) {
         return prefix.trim() + " " + String.format(Locale.US, "%02d", i);
     }
@@ -167,6 +191,15 @@ public class Config {
 
     public static synchronized void setLastSpeed(Context ctx, int idx) {
         prefs(ctx).edit().putInt("lastSpeedIdx", idx).apply();
+    }
+
+    /** 기기에 적용한 속도를 기억한다. idx < 0 이면 지운다(전원을 끄면 속도도 처음으로 돌아감). */
+    public static synchronized void setDevSpeed(Context ctx, int dev, int idx) {
+        SharedPreferences p = prefs(ctx);
+        Map<Integer, Integer> m = parseStatus(p.getString("devSpeed", ""));
+        if (idx < 0) m.remove(dev);
+        else m.put(dev, idx);
+        p.edit().putString("devSpeed", joinStatus(m)).apply();
     }
 
     /** 실행한 기기들의 '기준 선택'에 지금 선택을 더한다. (실행은 해제된 칸을 멈추지 않으므로 빼지 않음) */

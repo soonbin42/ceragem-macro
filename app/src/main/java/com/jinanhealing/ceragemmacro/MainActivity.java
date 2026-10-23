@@ -15,6 +15,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -200,15 +201,66 @@ public class MainActivity extends Activity {
         return started;
     }
 
-    /** 모드 변경: 누를 때마다 저속 → 정속 → 고속 → 저속… 하나씩 보낸다. */
+    /**
+     * 모드 변경: 누를 때마다 저속 → 정속 → 고속 → 저속… 골라 두기만 한다.
+     * 기기에는 '실행'을 눌렀을 때, 그 기기의 지금 속도와 다른 기기에만 적용된다.
+     */
     private void cycleSpeed() {
         syncFromPrefs();
         int next = (cfg.lastSpeedIdx + 1) % 3;
-        if (startMode(MacroService.MODE_CHANGE, SPEED_NAMES[next])) {
-            Config.setLastSpeed(this, next);
-            cfg.lastSpeedIdx = next;
-            updateAll();
+        Config.setLastSpeed(this, next);
+        cfg.lastSpeedIdx = next;
+        updateAll();
+        Toast.makeText(this, SPEED_NAMES[next] + "으로 골랐어요 — 실행을 누르면 속도가 다른 기기만 바꿔요", Toast.LENGTH_SHORT).show();
+    }
+
+    /** 수정 사항 적용: 어떤 단계(끄기·켜기·실행)를 할지 고른 뒤 시작한다. */
+    private void showApplyDialog() {
+        syncFromPrefs();
+        if (cfg.modifiedCount() == 0) {
+            Toast.makeText(this, "수정한 기기가 없어요", Toast.LENGTH_SHORT).show();
+            return;
         }
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(8), dp(22), 0);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= cfg.count; i++) {
+            if (cfg.modified(i)) sb.append(String.format(Locale.US, "%02d번  %s\n", i, cfg.planText(i)));
+        }
+        TextView plan = text(sb.toString().trim(), 14, INK, false);
+        plan.setPadding(0, 0, 0, dp(10));
+        box.addView(plan);
+        box.addView(text("할 단계를 고르세요", 13, MUTED, true));
+        final CheckBox cOff = stepCheck("끄기  (해제한 부위를 멈추거나 전원 끄기)");
+        final CheckBox cOn = stepCheck("켜기  (꺼진 기기 전원 켜기)");
+        final CheckBox cRun = stepCheck("실행  (새로 고른 부위 작동)");
+        box.addView(cOff);
+        box.addView(cOn);
+        box.addView(cRun);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("수정 사항 적용")
+                .setView(box)
+                .setPositiveButton("적용", (d, w) -> {
+                    MacroService.applyOff = cOff.isChecked();
+                    MacroService.applyOn = cOn.isChecked();
+                    MacroService.applyRun = cRun.isChecked();
+                    if (!(cOff.isChecked() || cOn.isChecked() || cRun.isChecked())) {
+                        Toast.makeText(this, "단계를 하나 이상 골라 주세요", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    startMode(MacroService.MODE_APPLY, "");
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    private CheckBox stepCheck(String label) {
+        CheckBox cb = new CheckBox(this);
+        cb.setText(label);
+        cb.setTextSize(15);
+        cb.setChecked(true);
+        return cb;
     }
 
     private void openA11ySettings() {
@@ -311,7 +363,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, dp(56), 1f);
         alp.setMargins(dp(4), dp(10), dp(4), 0);
         applyButton.setLayoutParams(alp);
-        applyButton.setOnClickListener(v -> startMode(MacroService.MODE_APPLY, ""));
+        applyButton.setOnClickListener(v -> showApplyDialog());
         row3.addView(applyButton);
         root.addView(row3);
 
@@ -579,7 +631,7 @@ public class MainActivity extends Activity {
         applyButton.setTextColor(n == 0 ? Color.parseColor("#6E655F") : Color.WHITE);
         if (modeChangeText != null) {
             int li = cfg.lastSpeedIdx;
-            modeChangeText.setText("모드 변경 · " + (li < 0 || li > 2 ? "—" : SPEED_NAMES[li]));
+            modeChangeText.setText("모드 변경 · " + (li < 0 || li > 2 ? "안 함" : SPEED_NAMES[li]));
             GradientDrawable mg = new GradientDrawable();
             mg.setCornerRadius(dp(16));
             mg.setColor(li < 0 || li > 2 ? Color.parseColor("#5C6670") : SPEED_COLORS[li]);
@@ -895,7 +947,7 @@ public class MainActivity extends Activity {
         box.setLayoutParams(lp);
         box.setClickable(true);
         box.setOnClickListener(v -> cycleSpeed());
-        modeChangeText = text("모드 변경 · —", 12, Color.WHITE, true);
+        modeChangeText = text("모드 변경 · 안 함", 12, Color.WHITE, true);
         modeChangeText.setGravity(Gravity.CENTER);
         modeChangeText.setSingleLine(true);
         box.addView(modeChangeText);
