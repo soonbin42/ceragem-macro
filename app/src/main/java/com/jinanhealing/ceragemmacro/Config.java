@@ -129,7 +129,19 @@ public class Config {
 
     /** 마지막 실행·적용 이후 선택이 바뀐 기기인지. */
     public boolean modified(int dev) {
-        return selSpine.contains(dev) != baseSpine.contains(dev) || selAbd.contains(dev) != baseAbd.contains(dev);
+        boolean sp = selSpine.contains(dev), ab = selAbd.contains(dev);
+        // 선택이 없고 전원도 꺼져 있다고 알고 있으면 할 일이 없다 (옛 기준이 남아 있어도 수정으로 보지 않음)
+        if (!sp && !ab && (statusOf(dev) & ST_POWER) == 0) return false;
+        return sp != baseSpine.contains(dev) || ab != baseAbd.contains(dev);
+    }
+
+    /** 실제로 돌고 있다고 볼 수 있는 기준: 전원이 꺼져 있다고 알면 아무것도 돌지 않는 것. */
+    public boolean effBaseSpine(int dev) {
+        return (statusOf(dev) & ST_POWER) != 0 && baseSpine.contains(dev);
+    }
+
+    public boolean effBaseAbd(int dev) {
+        return (statusOf(dev) & ST_POWER) != 0 && baseAbd.contains(dev);
     }
 
     public int modifiedCount() {
@@ -152,7 +164,7 @@ public class Config {
     /** '수정 사항 적용'이 이 기기에 할 일을 짧은 글로. (MacroService.doApply와 같은 규칙) */
     public String planText(int dev) {
         boolean sp = selSpine.contains(dev), ab = selAbd.contains(dev);
-        boolean bsp = baseSpine.contains(dev), bab = baseAbd.contains(dev);
+        boolean bsp = effBaseSpine(dev), bab = effBaseAbd(dev);
         if (!sp && !ab) return "전원 끄기";
         if (bsp && !sp) return "전원 끄기 → 켜기 → 복부만 실행";
         List<String> parts = new ArrayList<>();
@@ -203,11 +215,18 @@ public class Config {
     }
 
     /** 실행한 기기들의 '기준 선택'에 지금 선택을 더한다. (실행은 해제된 칸을 멈추지 않으므로 빼지 않음) */
-    public static synchronized void baselineAdd(Context ctx, Config sel, Collection<Integer> devs) {
+    /** 실행: 선택한 부위를 기준에 더한다. 실행 전에 꺼져 있다고 알던 기기는 아무것도 안 돌던 것이므로 선택대로 바꾼다. */
+    public static synchronized void baselineAdd(Context ctx, Config sel, Collection<Integer> devs, Map<Integer, Integer> before) {
         SharedPreferences p = prefs(ctx);
         Set<Integer> bs = parseSet(p.getString("baseSpine", joinSet(sel.baseSpine)), 99);
         Set<Integer> ba = parseSet(p.getString("baseAbd", joinSet(sel.baseAbd)), 99);
         for (int d : devs) {
+            Integer b0 = before == null ? null : before.get(d);
+            boolean wasOn = b0 != null && (b0 & ST_POWER) != 0;
+            if (!wasOn) {
+                bs.remove(d);
+                ba.remove(d);
+            }
             if (sel.selSpine.contains(d)) bs.add(d);
             if (sel.selAbd.contains(d)) ba.add(d);
         }

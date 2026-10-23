@@ -261,6 +261,7 @@ public class MacroService extends AccessibilityService {
         final java.util.Map<Integer, Integer> expectedBefore = new java.util.TreeMap<>(c.status);
         final java.util.Map<Integer, Integer> actualNow = new java.util.TreeMap<>();
         final List<Integer> doneDevices = new ArrayList<>();   // 실패하지 않은 기기(기준 선택 갱신용)
+        final List<Integer> okDevices = new ArrayList<>();     // 실패하지 않은 기기(점검 테두리 지우기용)
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
@@ -281,6 +282,7 @@ public class MacroService extends AccessibilityService {
                 if (r.kind == Result.OK) ok++;
                 else if (r.kind == Result.SKIP) skip++;
                 else fail++;
+                if (r.kind != Result.FAIL) okDevices.add(dev);
                 if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
                 lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                         .append(c.deviceName(dev)).append(" — ").append(r.msg).append('\n');
@@ -337,16 +339,22 @@ public class MacroService extends AccessibilityService {
             } else if (r.setBits != 0 || r.clearBits != 0) {
                 Config.updateStatus(this, dev, r.setBits, r.clearBits);
             }
-            if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
+            if (r.kind != Result.FAIL) okDevices.add(dev);
+                if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
             lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                     .append(name).append(" — ").append(r.msg).append('\n');
+        }
+        if (mode != MODE_CHECK && !okDevices.isEmpty()) {
+            // 점검에서 '다르다'고 표시했던 기기를 처리했으면 빨간 테두리를 지운다
+            java.util.Set<Integer> dd = new java.util.TreeSet<>(Config.load(this).diffDevs);
+            if (dd.removeAll(okDevices)) Config.setDiffDevs(this, dd);
         }
         String when = new SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(new Date());
         long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
         String[] sp = {"안정", "보통", "빠름"};
         String netNote = netAlerts > 0 ? "\n⚠ 세라젬 앱 네트워크 알림 " + netAlerts + "번 (통신 불안정) — 자동으로 닫음\n" : "";
         // 기준 선택 갱신: 실행 = 지금 선택을 더함 · 적용 = 선택과 똑같이 · 끄기 = 뺌
-        if (mode == MODE_RUN || mode == MODE_ON_RUN) Config.baselineAdd(this, c, doneDevices);
+        if (mode == MODE_RUN || mode == MODE_ON_RUN) Config.baselineAdd(this, c, doneDevices, expectedBefore);
         else if (mode == MODE_APPLY) Config.baselineSet(this, c, doneDevices);
         else if (mode == MODE_OFF) Config.baselineSet(this, c, doneDevices);   // 꺼진 뒤에는 지금 선택이 기준
         if (mode == MODE_CHECK) lines.append(finishCheck(c, expectedBefore, actualNow));
@@ -397,32 +405,50 @@ public class MacroService extends AccessibilityService {
         return r;
     }
 
-    /** 실행 + (골라 둔 속도가 이 기기의 지금 속도와 다르면) 같은 화면에서 속도도 바꾼다. 기기를 다시 열지 않는다. */
+    /**
+     * 실행 + (골라 둔 속도가 이 기기의 지금 속도와 다르면) 실행 전에 속도를 바꾼다.
+     * 척추가 스캔 중일 때는 속도 버튼이 없어서 실행 뒤에는 바꿀 수 없다 → 아직 멈춰 있는 실행 전에 한다.
+     * 속도 버튼이 없으면 기다리지 않고 바로 건너뛴다.
+     */
     private Result runWithSpeed(Config c, int dev) {
-        Result r = runMassage(c, dev);
         int want = c.lastSpeedIdx;
-        if (r.kind == Result.FAIL || stopRequested || want < 0 || want > 2
-                || !c.selSpine.contains(dev) || c.devSpeedOf(dev) == want) return r;
-        speedOverride = SPEED_LABELS[want];
-        Result sr;
-        try {
-            sr = changeSpineMode(c);
-        } finally {
-            speedOverride = "";
+        List<String> pg = pagesOverride != null ? pagesOverride : c.pagesFor(dev);
+        String speedMsg = "";
+        if (want >= 0 && want <= 2 && !stopRequested && c.selSpine.contains(dev) && pg.contains("1")
+                && c.devSpeedOf(dev) != want) {
+            sleep(pick(900, 600, 400));
+            showModePages();
+            goToFirstPage();
+            if (findCenteredOrVisible(ID_SPEED_BTN) == null) {
+                log("속도 버튼이 보이지 않아 속도 변경은 건너뜀 (상태 '" + centeredPageTexts()[1] + "')");
+                speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 건너뜀(속도 버튼 없음)";
+            } else {
+                speedOverride = SPEED_LABELS[want];
+                Result sr;
+                try {
+                    sr = changeSpineMode(c);
+                } finally {
+                    speedOverride = "";
+                }
+                if (sr.kind != Result.FAIL) {
+                    Config.setDevSpeed(this, dev, want);
+                    c.devSpeed.put(dev, want);
+                    speedMsg = sr.msg;
+                } else {
+                    speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 실패: " + sr.msg;
+                }
+            }
         }
-        if (sr.kind != Result.FAIL) {
-            Config.setDevSpeed(this, dev, want);
-            c.devSpeed.put(dev, want);
-        }
-        Result out;
-        if (sr.kind == Result.FAIL) {
-            out = Result.fail(r.msg + " / 속도 " + SPEED_LABELS[want] + " 변경 실패: " + sr.msg);
-            out.noRetry();
-        } else {
-            out = new Result(r.kind == Result.OK || sr.kind == Result.OK ? Result.OK : Result.SKIP, r.msg + " / " + sr.msg);
-        }
+        Result r = runMassage(c, dev);
+        if (speedMsg.isEmpty()) return r;
+        Result out = new Result(r.kind, r.msg + " / " + speedMsg);
         out.setBits = r.setBits;
         out.clearBits = r.clearBits;
+        out.actual = r.actual;
+        out.keepModified = r.keepModified;
+        out.unverified = r.unverified;
+        out.noRetry = r.noRetry;
+        out.expected = r.expected;
         return out;
     }
 
@@ -450,7 +476,7 @@ public class MacroService extends AccessibilityService {
      */
     private ApplyPlan planApply(Config c, int dev, boolean aOff, boolean aOn, boolean aRun) {
         boolean sp = c.selSpine.contains(dev), ab = c.selAbd.contains(dev);
-        boolean bsp = c.baseSpine.contains(dev), bab = c.baseAbd.contains(dev);
+        boolean bsp = c.effBaseSpine(dev), bab = c.effBaseAbd(dev);   // 꺼져 있다고 알면 아무것도 안 돌던 것
         ApplyPlan p = new ApplyPlan();
         if (!sp && !ab) {
             if (bsp || bab) {
