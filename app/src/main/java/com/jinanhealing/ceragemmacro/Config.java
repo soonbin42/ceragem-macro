@@ -228,6 +228,22 @@ public class Config {
         p.edit().putString("baseSpine", joinSet(bs)).putString("baseAbd", joinSet(ba)).apply();
     }
 
+    /** 점검에서 다르게 나온 기기들의 '기준'을 세라젬 앱의 실제 작동 상태로 맞춘다. */
+    public static synchronized void baselineFromActual(Context ctx, Config sel, Map<Integer, Integer> actual, Collection<Integer> devs) {
+        SharedPreferences p = prefs(ctx);
+        Set<Integer> bs = parseSet(p.getString("baseSpine", joinSet(sel.baseSpine)), 99);
+        Set<Integer> ba = parseSet(p.getString("baseAbd", joinSet(sel.baseAbd)), 99);
+        for (int d : devs) {
+            Integer a = actual.get(d);
+            if (a == null) continue;
+            if ((a & ST_SPINE) != 0) bs.add(d);
+            else bs.remove(d);
+            if ((a & ST_ABD) != 0) ba.add(d);
+            else ba.remove(d);
+        }
+        p.edit().putString("baseSpine", joinSet(bs)).putString("baseAbd", joinSet(ba)).apply();
+    }
+
     /** 끈 기기들은 기준 선택에서 뺀다. */
     public static synchronized void baselineClear(Context ctx, Config sel, Collection<Integer> devs) {
         SharedPreferences p = prefs(ctx);

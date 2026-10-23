@@ -345,12 +345,13 @@ public class MainActivity extends Activity {
         checkButton.setTextSize(15);
         checkButton.setTypeface(Typeface.DEFAULT_BOLD);
         checkButton.setTextColor(INK);
+        checkButton.setPadding(0, 0, 0, 0);
         GradientDrawable cbg = new GradientDrawable();
         cbg.setColor(Color.WHITE);
         cbg.setCornerRadius(dp(16));
         cbg.setStroke(dp(2), INK);
         checkButton.setBackground(cbg);
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(66), 1f);
         clp.setMargins(dp(4), dp(10), dp(4), 0);
         checkButton.setLayoutParams(clp);
         checkButton.setOnClickListener(v -> startMode(MacroService.MODE_CHECK, ""));
@@ -360,7 +361,9 @@ public class MainActivity extends Activity {
         applyButton.setTextSize(15);
         applyButton.setTypeface(Typeface.DEFAULT_BOLD);
         applyButton.setTextColor(Color.WHITE);
-        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        applyButton.setPadding(0, 0, 0, 0);
+        applyButton.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, dp(66), 1f);
         alp.setMargins(dp(4), dp(10), dp(4), 0);
         applyButton.setLayoutParams(alp);
         applyButton.setOnClickListener(v -> showApplyDialog());
@@ -649,13 +652,29 @@ public class MainActivity extends Activity {
         final String[] p = pendingCheck;
         if (p == null || isFinishing()) return;
         pendingCheck = null;
+        syncFromPrefs();      // 점검이 맞춰 둔 '기준'을 읽어 온 뒤에 고칠 목록을 만든다
         boolean same = p[0].startsWith("동일");
-        new android.app.AlertDialog.Builder(this)
-                .setTitle(same ? "세라젬 앱과 동일해요" : "세라젬 앱과 달라요")
-                .setMessage(p[1])
-                .setPositiveButton("확인", null)
+        boolean fix = p.length > 2 && "fix".equals(p[2]) && cfg.modifiedCount() > 0;
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this)
+                .setTitle(same ? "세라젬 앱과 동일해요" : "세라젬 앱과 달라요");
+        if (!fix) {
+            b.setMessage(p[1]).setPositiveButton("확인", null).show();
+            return;
+        }
+        StringBuilder sb = new StringBuilder(p[1]);
+        sb.append("\n\n선택한 대로 고칠까요?\n");
+        for (int i = 1; i <= cfg.count; i++) {
+            if (cfg.modified(i)) sb.append(String.format(Locale.US, "\n%02d번  %s", i, cfg.planText(i)));
+        }
+        b.setMessage(sb.toString())
+                .setPositiveButton("고치기", (d, w) -> {
+                    MacroService.applyOff = true;     // 수정 사항 적용과 같은 방식, 단계는 전부
+                    MacroService.applyOn = true;
+                    MacroService.applyRun = true;
+                    startMode(MacroService.MODE_APPLY, "");
+                })
+                .setNegativeButton("그대로 두기", null)
                 .show();
-        syncFromPrefs();
     }
 
     // ---------------------------------------------------------------- 기기 칸
