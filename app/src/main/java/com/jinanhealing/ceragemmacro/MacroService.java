@@ -44,7 +44,11 @@ public class MacroService extends AccessibilityService {
     public static final int MODE_CHANGE = 5;
     public static final int MODE_CHANGE_FAST = 6;
     public static final int MODE_CHANGE_SLOW = 7;
-    /** 이번 실행에만 쓰는 속도(모드 변경 고속/저속 버튼). 비어 있으면 설정값. */
+    /** 수정 사항 적용: 선택을 바꾼 기기만 — 새로 고른 칸은 시작, 해제한 칸은 멈춤 */
+    public static final int MODE_APPLY = 8;
+    /** 점검: 세라젬 앱 화면을 읽어 일괄조작이 알고 있는 상태와 비교(아무것도 누르지 않음) */
+    public static final int MODE_CHECK = 9;
+    /** 이번 실행에만 쓰는 속도(모드 변경 저속/정속/고속). 비어 있으면 설정값. */
     private volatile String speedOverride = "";
 
     public static volatile MacroService instance;
@@ -96,6 +100,11 @@ public class MacroService extends AccessibilityService {
             noRetry = true;
             return this;
         }
+
+        /** 이 결과로 알게 된 기기 상태 변화(Config.ST_* 비트): 켜진 것 / 꺼진 것 */
+        int setBits = 0, clearBits = 0;
+        /** 점검 결과: 실제 상태 비트(-1 = 읽지 못함) */
+        int actual = -1;
 
         /** 기기 상태 때문에 생긴 예상된 실패(예: 전원 꺼짐) — 재시도·리포트 안 함. */
         boolean expected = false;
@@ -171,6 +180,8 @@ public class MacroService extends AccessibilityService {
             case MODE_CHANGE: return "모드 변경";
             case MODE_CHANGE_FAST: return "모드 변경(고속)";
             case MODE_CHANGE_SLOW: return "모드 변경(저속)";
+            case MODE_APPLY: return "수정 사항 적용";
+            case MODE_CHECK: return "점검";
             default: return "?";
         }
     }
@@ -178,10 +189,16 @@ public class MacroService extends AccessibilityService {
     // ---------------------------------------------------------------- 실행
 
     public synchronized boolean start(final int mode) {
+        return start(mode, "");
+    }
+
+    /** speed: 모드 변경 때 이번에만 쓸 속도("저속" / "정속" / "고속"). 비우면 설정값. */
+    public synchronized boolean start(final int mode, final String speedLabel) {
         if (running) return false;
         running = true;
         stopRequested = false;
-        speedOverride = mode == MODE_CHANGE_FAST ? "고속" : mode == MODE_CHANGE_SLOW ? "저속" : "";
+        speedOverride = mode == MODE_CHANGE_FAST ? "고속" : mode == MODE_CHANGE_SLOW ? "저속"
+                : (speedLabel == null ? "" : speedLabel);
         new Thread(() -> {
             String report;
             PowerManager.WakeLock wl = null;
@@ -219,9 +236,13 @@ public class MacroService extends AccessibilityService {
     private String runAll(int mode) {
         Config c = Config.load(this);
         speed = c.speed;
-        List<Integer> devices = c.selectedList();
-        if (devices.isEmpty()) return "선택된 기기가 없어요.";
+        List<Integer> devices = devicesFor(c, mode);
+        if (devices.isEmpty()) return mode == MODE_APPLY ? "수정한 기기가 없어요." : "선택된 기기가 없어요.";
         long t0 = System.currentTimeMillis();
+        // 점검: 점검 전에 일괄조작이 알고 있던 상태 / 점검으로 알게 된 실제 상태
+        final java.util.Map<Integer, Integer> expectedBefore = new java.util.TreeMap<>(c.status);
+        final java.util.Map<Integer, Integer> actualNow = new java.util.TreeMap<>();
+        final List<Integer> doneDevices = new ArrayList<>();   // 실패하지 않은 기기(기준 선택 갱신용)
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
@@ -231,8 +252,8 @@ public class MacroService extends AccessibilityService {
         issues = 0;
         diagAlwaysSnap = 0;
         relaunchReason = "처음 시작";
-        log("시작: 전체 " + modeLabel(mode) + " · 기기 " + devices + " · 속도 " + speed
-                + " · 실행 페이지 '" + c.modeName + "'");
+        log("시작: " + modeTitle(mode) + " · 기기 " + devices + " · 속도 " + speed
+                + " · 척추 선택 " + c.selSpine + " · 복부 선택 " + c.selAbd);
         for (int k = 0; k < devices.size(); k++) {
             if (stopRequested) {
                 lines.append("⏹ 사용자가 중지함\n");
@@ -241,7 +262,8 @@ public class MacroService extends AccessibilityService {
             String name = c.deviceName(devices.get(k));
             toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
             log("── " + name);
-            Result r = doDevice(c, mode, name, relaunch);
+            final int dev = devices.get(k);
+            Result r = doDevice(c, mode, name, relaunch, dev);
             if (r.kind == Result.FAIL && stopRequested) {
                 log("⏹ 중지 요청으로 멈춤: " + r.msg);
             } else if (r.kind == Result.FAIL && r.expected) {
@@ -254,7 +276,7 @@ public class MacroService extends AccessibilityService {
             if (r.kind == Result.FAIL && !r.noRetry && !stopRequested) {
                 toast(name + " 다시 시도");
                 relaunchReason = name + " 재시도 (" + r.msg + ")";
-                r = doDevice(c, mode, name, true);
+                r = doDevice(c, mode, name, true, dev);
                 if (r.kind == Result.FAIL) {
                     log("❌ 재시도도 실패: " + r.msg);
                     snapshot(name + " 재시도 실패 직후");
@@ -275,6 +297,16 @@ public class MacroService extends AccessibilityService {
             if (r.kind == Result.OK) ok++;
             else if (r.kind == Result.SKIP) skip++;
             else fail++;
+            // 기기 상태 기억 (화면의 켜짐/실행 색)
+            if (mode == MODE_CHECK) {
+                if (r.actual >= 0) {
+                    actualNow.put(dev, r.actual);
+                    Config.updateStatus(this, dev, r.actual, Config.ST_ALL & ~r.actual);
+                }
+            } else if (r.setBits != 0 || r.clearBits != 0) {
+                Config.updateStatus(this, dev, r.setBits, r.clearBits);
+            }
+            if (r.kind != Result.FAIL) doneDevices.add(dev);
             lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                     .append(name).append(" — ").append(r.msg).append('\n');
         }
@@ -282,7 +314,12 @@ public class MacroService extends AccessibilityService {
         long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
         String[] sp = {"안정", "보통", "빠름"};
         String netNote = netAlerts > 0 ? "\n⚠ 세라젬 앱 네트워크 알림 " + netAlerts + "번 (통신 불안정) — 자동으로 닫음\n" : "";
-        String summary = "[" + when + "] 전체 " + modeLabel(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
+        // 기준 선택 갱신: 실행 = 지금 선택을 더함 · 적용 = 선택과 똑같이 · 끄기 = 뺌
+        if (mode == MODE_RUN || mode == MODE_ON_RUN) Config.baselineAdd(this, c, doneDevices);
+        else if (mode == MODE_APPLY) Config.baselineSet(this, c, doneDevices);
+        else if (mode == MODE_OFF) Config.baselineSet(this, c, doneDevices);   // 꺼진 뒤에는 지금 선택이 기준
+        if (mode == MODE_CHECK) lines.append(finishCheck(c, expectedBefore, actualNow));
+        String summary = "[" + when + "] " + modeTitle(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
                 + lines + netNote;
         boolean problem = fail > 0 || issues > 0 || netAlerts > 0 || lines.indexOf("확인 안 됨") >= 0;
@@ -297,8 +334,46 @@ public class MacroService extends AccessibilityService {
         return summary;
     }
 
-    private Result doDevice(Config c, int mode, String name, boolean relaunch) {
+    /** 모드마다 대상이 되는 기기: 켜기·끄기·실행 = 척추나 복부가 선택된 기기, 모드 변경 = 척추 선택, 적용 = 선택이 바뀐 기기, 점검 = 전부 */
+    private List<Integer> devicesFor(Config c, int mode) {
+        List<Integer> out = new ArrayList<>();
+        for (int i = 1; i <= c.count; i++) {
+            boolean sp = c.selSpine.contains(i), ab = c.selAbd.contains(i);
+            if (mode == MODE_CHECK) out.add(i);
+            else if (mode == MODE_APPLY) {
+                if (c.modified(i)) out.add(i);
+            } else if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) {
+                if (sp) out.add(i);
+            } else if (sp || ab) out.add(i);
+        }
+        return out;
+    }
+
+    private static String modeTitle(int mode) {
+        return (mode == MODE_APPLY || mode == MODE_CHECK ? "" : "전체 ") + modeLabel(mode);
+    }
+
+    /** doDeviceInner 결과에 '이 기기가 켜졌다/꺼졌다'는 상태 변화를 덧붙인다. */
+    private Result doDevice(Config c, int mode, String name, boolean relaunch, int dev) {
+        Result r = doDeviceInner(c, mode, name, relaunch, dev);
+        if (mode == MODE_ON && r.kind != Result.FAIL) r.setBits |= Config.ST_POWER;
+        else if (mode == MODE_OFF && r.kind != Result.FAIL) r.clearBits |= Config.ST_ALL;
+        if (r.kind == Result.FAIL && r.expected && r.msg.contains("전원이 꺼져")) r.clearBits |= Config.ST_ALL;
+        return r;
+    }
+
+    private Result doDeviceInner(Config c, int mode, String name, boolean relaunch, int dev) {
         if (relaunch && !launchTarget()) return Result.fail("세라젬 IoT 앱을 열 수 없음");
+
+        // 수정 사항 적용: 이 기기에서 새로 시작할 페이지 / 멈출 페이지
+        final List<String> startPages = new ArrayList<>(), stopPages = new ArrayList<>();
+        if (mode == MODE_APPLY) {
+            boolean sp = c.selSpine.contains(dev), ab = c.selAbd.contains(dev);
+            if (sp && !c.baseSpine.contains(dev)) startPages.add("1");
+            if (!sp && c.baseSpine.contains(dev)) stopPages.add("1");
+            if (ab && !c.baseAbd.contains(dev)) startPages.add("2");
+            if (!ab && c.baseAbd.contains(dev)) stopPages.add("2");
+        }
 
         AccessibilityNodeInfo card = findCard(c, name, relaunch);
         if (stopRequested) return Result.fail("중지됨");
@@ -313,6 +388,19 @@ public class MacroService extends AccessibilityService {
             // 목록만 보고 '이미 켜짐'으로 건너뛰지 않는다
         } else if (mode == MODE_OFF) {
             if (off) return Result.skip("이미 꺼져 있음");
+        } else if (mode == MODE_CHECK) {
+            if (off) {
+                Result r = Result.skip("전원 꺼짐");
+                r.actual = 0;
+                return r;
+            }
+        } else if (mode == MODE_APPLY && startPages.isEmpty()) {
+            // 멈추기만 하면 되는데 이미 꺼져 있으면 할 일이 없다
+            if (off) {
+                Result r = Result.skip("이미 꺼져 있어 멈출 것 없음");
+                r.clearBits = Config.ST_ALL;
+                return r;
+            }
         } else {
             if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
         }
@@ -353,6 +441,16 @@ public class MacroService extends AccessibilityService {
         if (mode != MODE_ON && mode != MODE_OFF) {
             sleep(pick(500, 300, 150));
             if (visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null) {
+                if (mode == MODE_CHECK) {
+                    Result r = Result.skip("전원 꺼짐");
+                    r.actual = 0;
+                    return r;
+                }
+                if (mode == MODE_APPLY && startPages.isEmpty()) {
+                    Result r = Result.skip("이미 꺼져 있어 멈출 것 없음");
+                    r.clearBits = Config.ST_ALL;
+                    return r;
+                }
                 return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
             }
         }
@@ -425,7 +523,9 @@ public class MacroService extends AccessibilityService {
             return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
         }
         if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) return changeSpineMode(c);
-        return runMassage(c);
+        if (mode == MODE_CHECK) return checkDevice(c);
+        if (mode == MODE_APPLY) return applyDevice(c, startPages, stopPages);
+        return runMassage(c, dev);
     }
 
     private static final String ID_MODES_BTN = "kr.co.ceragem.iot:id/open_body_parts_modes";
@@ -621,7 +721,15 @@ public class MacroService extends AccessibilityService {
     private static final String ID_MODE_STATUS = "kr.co.ceragem.iot:id/page_widget_04";
 
     /** 설정한 모드들(쉼표 구분)을 순서대로 넘겨 가며 각각 ▶를 누른다. 예: 릴렉스 모드 → 음파 진동 마사지1 */
-    private Result runMassage(Config c) {
+    private Result runMassage(Config c, int dev) {
+        sleep(pick(1500, 1000, 700));
+        List<String> pg = c.pagesFor(dev);
+        if (pg.isEmpty()) return Result.skip("선택된 부위 없음");
+        return runPages(c, pg, null, false);
+    }
+
+    /** 척추·복부를 따로 고르게 되면서 쓰지 않는 옛 방식(모드 이름으로 찾기). */
+    private Result runMassageLegacy(Config c) {
         sleep(pick(1500, 1000, 700));
         List<String> modes = new ArrayList<>();
         if (c.modeName != null) {
@@ -639,7 +747,7 @@ public class MacroService extends AccessibilityService {
         // 숫자만 적혀 있으면(예: "1, 2") 모드 이름과 상관없이 페이지 순서로 실행
         boolean byPage = true;
         for (String m : modes) if (!m.matches("\\d+")) byPage = false;
-        if (byPage) return runPages(c, modes);
+        if (byPage) return runPages(c, modes, null, false);
 
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
         for (final String mode : modes) {
@@ -686,7 +794,7 @@ public class MacroService extends AccessibilityService {
     }
 
     /** 첫 번째 페이지(척추)부터 차례로, 적힌 번호의 페이지에서 ▶를 누른다. 모드 이름은 보지 않는다. */
-    private Result runPages(Config c, List<String> pageList) {
+    private Result runPages(Config c, List<String> pageList, java.util.Set<Integer> stopSet, boolean readOnly) {
         List<Integer> pages = new ArrayList<>();
         for (String s : pageList) {
             int n;
@@ -704,6 +812,10 @@ public class MacroService extends AccessibilityService {
         showModePages();
         goToFirstPage();
         List<String> started = new ArrayList<>(), already = new ArrayList<>(), unsure = new ArrayList<>(), failed = new ArrayList<>();
+        List<String> stopped = new ArrayList<>(), idle = new ArrayList<>(), seen = new ArrayList<>();
+        int setB = 0, clrB = 0;       // 알게 된 상태 변화 (Config.ST_*)
+        boolean pressedStop = false;  // 멈추려고 ▶를 이미 눌렀으면 자동 재시도 금지(한 번 더 누르면 다시 시작됨)
+        int readBits = 0, readMask = 0;   // 점검: 작동 중인 부위 / 읽은 부위
         // 지나온 페이지의 모드 이름(같은 페이지를 두 번 누르지 않기 위해)
         final java.util.Set<String> visited = new java.util.HashSet<>();
         int current = 1;
@@ -776,6 +888,50 @@ public class MacroService extends AccessibilityService {
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
             log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
+            final int bit = target == 1 ? Config.ST_SPINE : target == 2 ? Config.ST_ABD : 0;
+            final boolean isStop = stopSet != null && stopSet.contains(target);
+            if (readOnly || isStop) {
+                // 척추(1번): 대기가 아닌 모든 글자(스캔 대기·척추 스캔중·마사지 중) = 작동 중
+                // 그 밖의 페이지: '마사지 중'일 때만 작동 중 (다른 글자는 앞 페이지 상태가 비친 것)
+                boolean runningNow = target == 1 ? (!st.isEmpty() && !st.equals("마사지대기")) : st.equals("마사지중");
+                if (readOnly) {
+                    readMask |= bit;
+                    if (runningNow) readBits |= bit;
+                    seen.add(label + (runningNow ? " 작동 중" : " 멈춤"));
+                    continue;
+                }
+                if (!runningNow) {
+                    idle.add(label);
+                    clrB |= bit;
+                    continue;
+                }
+                if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    failed.add(label + " 멈추기 누르기 실패");
+                    continue;
+                }
+                pressedStop = true;
+                sleep(pick(600, 400, 250));
+                confirmDialogIfAny();
+                final String pidStop = pid;
+                AccessibilityNodeInfo done = waitFor(() -> {
+                    AccessibilityNodeInfo p = findCenteredById(pidStop);
+                    if (p == null) return null;
+                    String[] x = pageTexts(p);
+                    return (x[0].trim().equals(want) && norm(x[1]).equals("마사지대기")) ? p : null;
+                }, pick(6000, 4500, 3500));
+                AccessibilityNodeInfo pa = findCenteredById(pidStop);
+                log(label + " 멈춤 ▶ 누른 뒤 상태: '" + (pa == null ? (isMassageRunning() ? "진행 화면" : "?") : pageTexts(pa)[1]) + "'");
+                if (done != null) {
+                    stopped.add(label);
+                    clrB |= bit;
+                } else {
+                    failed.add(label + " 멈춤 확인 안 됨 (▶는 눌렀음 — 점검으로 확인)");
+                    issues++;
+                    snapshot(label + " 멈춤 확인 안 됨");
+                }
+                sleep(pick(1200, 600, 250));
+                continue;
+            }
             // 2번째 이후 페이지(음파 진동 등): '마사지 중'일 때만 작동 중으로 보고,
             // 그 밖의 글자(마사지 대기, 앞 페이지에서 비친 스캔 대기·척추 스캔중 등)면 기다리지 않고 바로 ▶
             if (target > 1 && !st.equals("마사지중") && !st.equals("마사지대기")) {
@@ -803,6 +959,7 @@ public class MacroService extends AccessibilityService {
             if (target > 1 && !st.equals("마사지중")) st = "마사지대기";
             if (!st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
+                setB |= bit;
                 if (diagAlwaysSnap < 2) {   // 한 번 실행에 두 번까지만 화면 기록
                     diagAlwaysSnap++;
                     snapshot(label + " '이미 작동 중'으로 판단한 화면");
@@ -840,9 +997,12 @@ public class MacroService extends AccessibilityService {
                     log(label + " 두 번째 ▶ 뒤 상태: '" + (pb == null ? "?" : pageTexts(pb)[1]) + "'");
                 }
             }
-            if (ok != null) started.add(label);
-            else {
+            if (ok != null) {
+                started.add(label);
+                setB |= bit;
+            } else {
                 unsure.add(label);
+                setB |= bit;      // 눌렀으니 시작됐을 가능성이 크다 — 틀리면 점검에서 드러난다
                 issues++;
                 log(label + " ▶ 누른 뒤 상태 변화 확인 안 됨");
                 snapshot(label + " ▶ 확인 안 됨");
@@ -850,17 +1010,95 @@ public class MacroService extends AccessibilityService {
             sleep(pick(1200, 600, 250));
         }
 
+        if (readOnly) {
+            Result r;
+            String m = seen.isEmpty() ? "" : String.join(" / ", seen);
+            if (!failed.isEmpty()) m += (m.isEmpty() ? "" : " / ") + String.join(", ", failed);
+            if (readMask == (Config.ST_SPINE | Config.ST_ABD)) {
+                r = Result.ok(m);
+                r.actual = Config.ST_POWER | readBits;
+            } else {
+                r = Result.fail(m.isEmpty() ? "화면을 읽지 못함" : m + " (일부만 읽음)");
+            }
+            return r;
+        }
+
         StringBuilder msg = new StringBuilder();
         if (!started.isEmpty()) msg.append(String.join(" + ", started)).append(" 작동 시작");
+        if (!stopped.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", stopped)).append(" 멈춤");
         if (!already.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", already)).append(" 이미 작동 중");
-        if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" ▶ 누름(확인 안 됨)");
+        if (!idle.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", idle)).append(" 이미 멈춰 있음");
+        if (!unsure.isEmpty()) msg.append(msg.length() > 0 ? " / " : "").append(String.join(" + ", unsure)).append(" 누름(확인 안 됨)");
+        if (setB != 0) setB |= Config.ST_POWER;
+        Result res;
         if (!failed.isEmpty()) {
             msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
             Result f = Result.fail(msg.toString());
-            return (started.isEmpty() && unsure.isEmpty()) ? f : f.noRetry();
+            res = (started.isEmpty() && unsure.isEmpty() && stopped.isEmpty() && !pressedStop) ? f : f.noRetry();
+        } else if (started.isEmpty() && unsure.isEmpty() && stopped.isEmpty()) {
+            res = Result.skip(msg.toString());
+        } else {
+            res = Result.ok(msg.toString());
         }
-        if (started.isEmpty() && unsure.isEmpty()) return Result.skip(msg.toString());
-        return Result.ok(msg.toString());
+        res.setBits = setB;
+        res.clearBits = clrB;
+        return res;
+    }
+
+    /** 수정 사항 적용: 새로 고른 부위는 시작하고, 해제한 부위는 멈춘다. (이미 그 상태면 누르지 않는다) */
+    private Result applyDevice(Config c, List<String> startPages, List<String> stopPages) {
+        sleep(pick(1500, 1000, 700));
+        List<String> all = new ArrayList<>(startPages);
+        all.addAll(stopPages);
+        if (all.isEmpty()) return Result.skip("바뀐 부분 없음");
+        java.util.Set<Integer> stopSet = new java.util.TreeSet<>();
+        for (String x : stopPages) stopSet.add(Integer.parseInt(x));
+        return runPages(c, all, stopSet, false);
+    }
+
+    /** 점검: 누르지 않고 척추(1번)·복부(2번) 페이지의 상태 글자만 읽는다. */
+    private Result checkDevice(Config c) {
+        sleep(pick(1200, 800, 500));
+        List<String> both = new ArrayList<>();
+        both.add("1");
+        both.add("2");
+        return runPages(c, both, null, true);
+    }
+
+    /** 점검 결과를 일괄조작이 알던 상태와 비교해 문장으로 만들고, 다른 기기를 표시한다. */
+    private String finishCheck(Config c, java.util.Map<Integer, Integer> before, java.util.Map<Integer, Integer> actual) {
+        List<Integer> diffs = new ArrayList<>();
+        List<String> unread = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= c.count; i++) {
+            Integer a = actual.get(i);
+            if (a == null) {
+                unread.add(String.format(java.util.Locale.US, "%02d", i));
+                continue;
+            }
+            Integer e0 = before.get(i);
+            int e = e0 == null ? 0 : e0;
+            if (e != a) {
+                diffs.add(i);
+                sb.append(String.format(java.util.Locale.US, "%02d번  일괄조작: %s  →  세라젬 앱: %s\n", i, describeStatus(e), describeStatus(a)));
+            }
+        }
+        Config.setDiffDevs(this, diffs);
+        StringBuilder out = new StringBuilder();
+        if (diffs.isEmpty()) out.append("점검 결과: 일괄조작과 세라젬 앱이 동일해요.");
+        else out.append("점검 결과: ").append(diffs.size()).append("대가 달라요.\n").append(sb);
+        if (!unread.isEmpty()) out.append("\n읽지 못한 기기: ").append(String.join(", ", unread));
+        String text = out.toString().trim();
+        MainActivity.pendingCheck = new String[]{diffs.isEmpty() && unread.isEmpty() ? "동일해요" : "다른 부분이 있어요", text};
+        return text + "\n";
+    }
+
+    private static String describeStatus(int st) {
+        if ((st & Config.ST_POWER) == 0 && (st & (Config.ST_SPINE | Config.ST_ABD)) == 0) return "꺼짐";
+        StringBuilder b = new StringBuilder();
+        if ((st & Config.ST_SPINE) != 0) b.append("척추 작동");
+        if ((st & Config.ST_ABD) != 0) b.append(b.length() > 0 ? " + " : "").append("복부 작동");
+        return b.length() == 0 ? "켜짐(작동 없음)" : b.toString();
     }
 
     private long lastNetAlert = 0;
