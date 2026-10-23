@@ -193,9 +193,10 @@ public class MainActivity extends Activity {
         }
         if (mode == MacroService.MODE_CHECK) {
             pendingCheck = null;
-            Config.setDiffDevs(this, new ArrayList<Integer>());
-            cfg.diffDevs.clear();
         }
+        // 점검 다음 동작을 시작하면 '달랐던 곳' 빨간 테두리는 지운다
+        Config.setDiffDevs(this, new ArrayList<Integer>());
+        cfg.diffDevs.clear();
         boolean started = svc.start(mode, speedLabel);
         updateAll();
         return started;
@@ -209,9 +210,11 @@ public class MainActivity extends Activity {
         syncFromPrefs();
         int next = (cfg.lastSpeedIdx + 1) % 3;
         Config.setLastSpeed(this, next);
+        Config.setSpeedPending(this, true);
         cfg.lastSpeedIdx = next;
+        cfg.speedPending = true;
         updateAll();
-        Toast.makeText(this, SPEED_NAMES[next] + "으로 골랐어요 — 실행을 누르면 속도가 다른 기기만 바꿔요", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, SPEED_NAMES[next] + "으로 골랐어요 — 다음 실행 때 한 번만, 속도가 다른 기기에 적용돼요", Toast.LENGTH_SHORT).show();
     }
 
     /** 수정 사항 적용: 어떤 단계(끄기·켜기·실행)를 할지 고른 뒤 시작한다. */
@@ -530,6 +533,7 @@ public class MainActivity extends Activity {
 
     /** 서비스가 저장해 둔 상태·기준 선택·점검 결과를 화면용 설정에 다시 읽어 온다. (선택은 건드리지 않음) */
     private void syncFromPrefs() {
+        Config.expireDiff(this);
         Config f = Config.load(this);
         cfg.status = f.status;
         cfg.baseSpine = f.baseSpine;
@@ -537,6 +541,7 @@ public class MainActivity extends Activity {
         cfg.diffDevs = f.diffDevs;
         cfg.runStartedAt = f.runStartedAt;
         cfg.lastSpeedIdx = f.lastSpeedIdx;
+        cfg.speedPending = f.speedPending;
         updateAll();
     }
 
@@ -633,7 +638,7 @@ public class MainActivity extends Activity {
         applyButton.setBackground(g);
         applyButton.setTextColor(n == 0 ? Color.parseColor("#6E655F") : Color.WHITE);
         if (modeChangeText != null) {
-            int li = cfg.lastSpeedIdx;
+            int li = cfg.speedPending ? cfg.lastSpeedIdx : -1;
             modeChangeText.setText("모드 변경 · " + (li < 0 || li > 2 ? "안 함" : SPEED_NAMES[li]));
             GradientDrawable mg = new GradientDrawable();
             mg.setCornerRadius(dp(16));

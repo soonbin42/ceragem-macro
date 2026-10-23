@@ -256,12 +256,13 @@ public class MacroService extends AccessibilityService {
         speed = c.speed;
         List<Integer> devices = devicesFor(c, mode);
         if (devices.isEmpty()) return mode == MODE_APPLY ? "수정한 기기가 없어요." : "선택된 기기가 없어요.";
+        // 점검 다음 동작을 시작하면 '달랐던 곳' 표시는 지운다
+        if (mode != MODE_CHECK && !c.diffDevs.isEmpty()) Config.setDiffDevs(this, new ArrayList<Integer>());
         long t0 = System.currentTimeMillis();
         // 점검: 점검 전에 일괄조작이 알고 있던 상태 / 점검으로 알게 된 실제 상태
         final java.util.Map<Integer, Integer> expectedBefore = new java.util.TreeMap<>(c.status);
         final java.util.Map<Integer, Integer> actualNow = new java.util.TreeMap<>();
         final List<Integer> doneDevices = new ArrayList<>();   // 실패하지 않은 기기(기준 선택 갱신용)
-        final List<Integer> okDevices = new ArrayList<>();     // 실패하지 않은 기기(점검 테두리 지우기용)
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
@@ -282,7 +283,6 @@ public class MacroService extends AccessibilityService {
                 if (r.kind == Result.OK) ok++;
                 else if (r.kind == Result.SKIP) skip++;
                 else fail++;
-                if (r.kind != Result.FAIL) okDevices.add(dev);
                 if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
                 lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                         .append(c.deviceName(dev)).append(" — ").append(r.msg).append('\n');
@@ -339,15 +339,13 @@ public class MacroService extends AccessibilityService {
             } else if (r.setBits != 0 || r.clearBits != 0) {
                 Config.updateStatus(this, dev, r.setBits, r.clearBits);
             }
-            if (r.kind != Result.FAIL) okDevices.add(dev);
                 if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
             lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                     .append(name).append(" — ").append(r.msg).append('\n');
         }
-        if (mode != MODE_CHECK && !okDevices.isEmpty()) {
-            // 점검에서 '다르다'고 표시했던 기기를 처리했으면 빨간 테두리를 지운다
-            java.util.Set<Integer> dd = new java.util.TreeSet<>(Config.load(this).diffDevs);
-            if (dd.removeAll(okDevices)) Config.setDiffDevs(this, dd);
+        // 골라 둔 속도는 '모드 변경'을 누른 뒤 한 번의 실행·적용에만 쓴다
+        if ((mode == MODE_RUN || mode == MODE_APPLY) && c.speedPending && !stopRequested) {
+            Config.setSpeedPending(this, false);
         }
         String when = new SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(new Date());
         long secs = (System.currentTimeMillis() - t0 + 500) / 1000;
@@ -406,37 +404,45 @@ public class MacroService extends AccessibilityService {
     }
 
     /**
-     * 실행 + (골라 둔 속도가 이 기기의 지금 속도와 다르면) 실행 전에 속도를 바꾼다.
+     * 실행. '모드 변경'을 눌러 골라 둔 속도가 있으면(한 번만) 실행 전에 속도를 바꾼다.
      * 척추가 스캔 중일 때는 속도 버튼이 없어서 실행 뒤에는 바꿀 수 없다 → 아직 멈춰 있는 실행 전에 한다.
-     * 속도 버튼이 없으면 기다리지 않고 바로 건너뛴다.
+     * 가능한 한 빠르게 하고, 속도 버튼이 없으면 기다리지 않고 건너뛴다.
      */
     private Result runWithSpeed(Config c, int dev) {
-        int want = c.lastSpeedIdx;
+        int want = c.speedPending ? c.lastSpeedIdx : -1;
         List<String> pg = pagesOverride != null ? pagesOverride : c.pagesFor(dev);
         String speedMsg = "";
         if (want >= 0 && want <= 2 && !stopRequested && c.selSpine.contains(dev) && pg.contains("1")
                 && c.devSpeedOf(dev) != want) {
-            sleep(pick(900, 600, 400));
             showModePages();
             goToFirstPage();
             if (findCenteredOrVisible(ID_SPEED_BTN) == null) {
                 log("속도 버튼이 보이지 않아 속도 변경은 건너뜀 (상태 '" + centeredPageTexts()[1] + "')");
                 speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 건너뜀(속도 버튼 없음)";
             } else {
-                speedOverride = SPEED_LABELS[want];
-                Result sr;
-                try {
-                    sr = changeSpineMode(c);
-                } finally {
-                    speedOverride = "";
+                final String target = c.changeModeName == null || c.changeModeName.trim().isEmpty()
+                        ? "릴렉스 모드" : c.changeModeName.trim();
+                final String no = c.changeModeNo == null ? "" : c.changeModeNo.trim();
+                AccessibilityNodeInfo mb = findCenteredOrVisible(ID_MODES_BTN);
+                if (mb == null) mb = findCenteredOrVisible(ID_SPINE_MODES_BTN);
+                boolean modeOk = (mb != null && !no.isEmpty() && no.equals(norm(mb.getText()))) || isModeCentered(target);
+                String sm;
+                if (modeOk) {
+                    sm = quickSpeed(want);       // 모드는 이미 맞음 → 속도만 빠르게
+                } else {
+                    speedOverride = SPEED_LABELS[want];
+                    try {
+                        Result sr = changeSpineMode(c);
+                        sm = sr.kind == Result.FAIL ? "속도 변경 실패: " + sr.msg : "속도 " + SPEED_LABELS[want];
+                    } finally {
+                        speedOverride = "";
+                    }
                 }
-                if (sr.kind != Result.FAIL) {
+                if (sm != null && sm.startsWith("속도 ") && !sm.contains("못") && !sm.contains("실패")) {
                     Config.setDevSpeed(this, dev, want);
                     c.devSpeed.put(dev, want);
-                    speedMsg = sr.msg;
-                } else {
-                    speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 실패: " + sr.msg;
                 }
+                speedMsg = sm == null ? "속도 버튼 없음" : sm;
             }
         }
         Result r = runMassage(c, dev);
@@ -450,6 +456,29 @@ public class MacroService extends AccessibilityService {
         out.noRetry = r.noRetry;
         out.expected = r.expected;
         return out;
+    }
+
+    /** 속도 버튼 → 저속/정속/고속 → ✓ 완료. 기다림을 최소로 한다. 속도 버튼이 없으면 null. */
+    private String quickSpeed(int want) {
+        final String rid = want == 0 ? "kr.co.ceragem.iot:id/speed_low"
+                : want == 1 ? "kr.co.ceragem.iot:id/speed_constant" : "kr.co.ceragem.iot:id/speed_high";
+        AccessibilityNodeInfo btn = findCenteredOrVisible(ID_SPEED_BTN);
+        if (btn == null) return null;
+        if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) return "속도 버튼 못 누름";
+        AccessibilityNodeInfo radio = waitFor(() -> findById(rid), 2500);
+        if (radio == null) {
+            log("속도 선택 창이 뜨지 않음");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            return "속도 창 못 엶";
+        }
+        sleep(pick(250, 150, 100));
+        if (!radio.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(radio);
+        sleep(pick(300, 200, 150));
+        AccessibilityNodeInfo doneBtn = findById(ID_SHEET_DONE);
+        if (doneBtn != null && !doneBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(doneBtn);
+        sleep(pick(450, 300, 200));
+        log("속도 " + SPEED_LABELS[want] + " 선택(빠르게)");
+        return "속도 " + SPEED_LABELS[want];
     }
 
     private static class ApplyPlan {
@@ -696,6 +725,26 @@ public class MacroService extends AccessibilityService {
 
         String status = collectText(card);
         log("목록 카드: " + clean(status));
+        if (isNetDown(status)) {
+            // 목록에 '네트워크 연결안됨' — 이 상태에서 기기 화면을 열면 엉뚱한 버튼을 누르게 된다.
+            // 잠깐 기다려 글자가 바뀌는지 보고, 그대로면 세라젬 앱을 다시 열어 확인한다.
+            log("⚠ 목록에 '네트워크 연결안됨' — 잠깐 기다려 봄");
+            AccessibilityNodeInfo up = waitCardNetUp(name, 5000);
+            if (up == null && !stopRequested) {
+                log("⚠ 계속 연결안됨 — 세라젬 앱을 다시 열어 확인");
+                issues++;
+                relaunchReason = name + " 네트워크 연결안됨";
+                if (launchTarget()) {
+                    AccessibilityNodeInfo fresh = findCard(c, name, true);
+                    if (fresh != null) up = isNetDown(collectText(fresh)) ? waitCardNetUp(name, 6000) : fresh;
+                }
+            }
+            if (stopRequested) return Result.fail("중지됨");
+            if (up == null) return Result.fail("네트워크 연결안됨 — 기기와 연결되지 않아 건드리지 않음").expected();
+            card = up;
+            status = collectText(card);
+            log("목록 카드: " + clean(status));
+        }
         // 목록의 상태 글자는 앱을 막 열었을 때 '사용 가능'으로 먼저 나왔다가 늦게 '(전원 꺼짐)'으로 바뀐다.
         // 그래서 '전원 꺼짐'만 믿고, 켜짐 여부는 기기 화면에서 판단한다.
         boolean off = status.contains("전원 꺼짐");
@@ -1678,6 +1727,26 @@ public class MacroService extends AccessibilityService {
     }
 
     // ---------------------------------------------------------------- 세라젬 화면 조작
+
+    private static boolean isNetDown(String listText) {
+        if (listText == null) return false;
+        String n = listText.replace(" ", "");
+        return n.contains("연결안됨") || n.contains("연결이해제");
+    }
+
+    /** 목록의 그 기기 카드 글자에서 '연결안됨'이 사라지면 그 카드를, ms 안에 안 사라지면 null. */
+    private AccessibilityNodeInfo waitCardNetUp(String name, long ms) {
+        long t0 = System.currentTimeMillis();
+        while (!stopRequested && System.currentTimeMillis() - t0 < ms) {
+            sleep(500);
+            AccessibilityNodeInfo t = findExactText(name);
+            if (t != null && t.isVisibleToUser()) {
+                AccessibilityNodeInfo cn = containerOf(t);
+                if (!isNetDown(collectText(cn))) return cn;
+            }
+        }
+        return null;
+    }
 
     private boolean launchTarget() {
         log("세라젬 앱 새로 열기 — 이유: " + relaunchReason);

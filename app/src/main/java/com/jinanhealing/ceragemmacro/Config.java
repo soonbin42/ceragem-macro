@@ -48,6 +48,8 @@ public class Config {
     public long runStartedAt = 0;
     /** '모드 변경'으로 골라 둔 속도(실행을 누를 때 적용): -1 없음 · 0 저속 · 1 정속 · 2 고속 */
     public int lastSpeedIdx = -1;
+    /** 모드 변경을 눌러 골라 둔 속도를 다음 실행에 한 번만 적용할지 */
+    public boolean speedPending = false;
     /** 기기별로 마지막에 적용한 속도(0~2). 없으면 아직 모름 → 골라 둔 속도와 다를 때만 바꾼다. */
     public Map<Integer, Integer> devSpeed = new TreeMap<>();
 
@@ -87,6 +89,7 @@ public class Config {
         c.status = parseStatus(p.getString("status", ""));
         c.runStartedAt = p.getLong("runStartedAt", 0);
         c.lastSpeedIdx = p.getInt("lastSpeedIdx", -1);
+        c.speedPending = p.getBoolean("speedPending", false);
         c.devSpeed = parseStatus(p.getString("devSpeed", ""));
         return c;
     }
@@ -194,11 +197,27 @@ public class Config {
     }
 
     public static synchronized void setDiffDevs(Context ctx, Collection<Integer> devs) {
-        prefs(ctx).edit().putString("diffDevs", joinSet(devs)).apply();
+        SharedPreferences.Editor e = prefs(ctx).edit().putString("diffDevs", joinSet(devs));
+        if (devs != null && !devs.isEmpty()) e.putLong("diffAt", System.currentTimeMillis());
+        e.apply();
     }
 
     public static synchronized void setRunStarted(Context ctx, long t) {
         prefs(ctx).edit().putLong("runStartedAt", t).apply();
+    }
+
+    public static synchronized void setSpeedPending(Context ctx, boolean on) {
+        prefs(ctx).edit().putBoolean("speedPending", on).apply();
+    }
+
+    /** 점검에서 '다르다'고 표시한 빨간 테두리는 30분이 지나면 지운다. */
+    public static synchronized void expireDiff(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        if (p.getString("diffDevs", "").isEmpty()) return;
+        long at = p.getLong("diffAt", 0);
+        if (at == 0 || System.currentTimeMillis() - at > 30 * 60 * 1000L) {
+            p.edit().putString("diffDevs", "").apply();
+        }
     }
 
     public static synchronized void setLastSpeed(Context ctx, int idx) {
