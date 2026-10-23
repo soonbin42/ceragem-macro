@@ -80,6 +80,12 @@ public class MacroService extends AccessibilityService {
     private final StringBuilder diag = new StringBuilder();
     private int issues = 0;
     private int diagAlwaysSnap = 0;
+    /** 수정 사항 적용에서만: ▶ 누른 뒤 상태가 바뀌었는지 잠깐 본다 */
+    private volatile boolean verifyStart = false;
+    /** ▶를 접근성 클릭 대신 실제 터치로 누른다 (다시 시도할 때) */
+    private volatile boolean tapPress = false;
+    /** 방금 전원 켜기를 눌렀으므로 목록의 '전원 꺼짐' 글자를 믿지 않는다 */
+    private volatile boolean afterPowerOn = false;
     private String relaunchReason = "처음 시작";
 
     /** 속도에 따라 대기 시간을 고른다. */
@@ -114,6 +120,8 @@ public class MacroService extends AccessibilityService {
         int actual = -1;
         /** 적용에서 고르지 않은 단계가 필요해 다 못 했으면 true → 계속 '수정됨'으로 둔다 */
         boolean keepModified = false;
+        /** ▶/전원 버튼은 눌렀지만 화면이 바뀐 것을 보지 못함 (수정 사항 적용에서 다시 확인하는 데 씀) */
+        boolean unverified = false;
 
         /** 기기 상태 때문에 생긴 예상된 실패(예: 전원 꺼짐) — 재시도·리포트 안 함. */
         boolean expected = false;
@@ -264,7 +272,20 @@ public class MacroService extends AccessibilityService {
         relaunchReason = "처음 시작";
         log("시작: " + modeTitle(mode) + " · 기기 " + devices + " · 속도 " + speed
                 + " · 척추 선택 " + c.selSpine + " · 복부 선택 " + c.selAbd);
-        for (int k = 0; k < devices.size(); k++) {
+        if (mode == MODE_APPLY) {
+            // 수정 사항 적용: 기기마다 끝까지 하지 않고 단계별로 묶어서 한다 (모두 끄기 → 10초 → 모두 켜기 → 실행)
+            java.util.Map<Integer, Result> res = runApplyBatch(c, devices);
+            if (stopRequested) lines.append("⏹ 사용자가 중지함\n");
+            for (int dev : devices) {
+                Result r = res.get(dev);
+                if (r.kind == Result.OK) ok++;
+                else if (r.kind == Result.SKIP) skip++;
+                else fail++;
+                if (r.kind != Result.FAIL && !r.keepModified) doneDevices.add(dev);
+                lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
+                        .append(c.deviceName(dev)).append(" — ").append(r.msg).append('\n');
+            }
+        } else for (int k = 0; k < devices.size(); k++) {
             if (stopRequested) {
                 lines.append("⏹ 사용자가 중지함\n");
                 break;
@@ -365,7 +386,6 @@ public class MacroService extends AccessibilityService {
 
     /** doDeviceInner 결과에 '이 기기가 켜졌다/꺼졌다'는 상태 변화를 덧붙이고, 수정 사항 적용·속도 변경을 이어 붙인다. */
     private Result doDevice(Config c, int mode, String name, boolean relaunch, int dev) {
-        if (mode == MODE_APPLY) return doApply(c, name, relaunch, dev);
         Result r = doDeviceInner(c, mode, name, relaunch, dev);
         if (mode == MODE_ON && r.kind != Result.FAIL) r.setBits |= Config.ST_POWER;
         else if (mode == MODE_OFF && r.kind != Result.FAIL) {
@@ -406,117 +426,239 @@ public class MacroService extends AccessibilityService {
         return out;
     }
 
+    private static class ApplyPlan {
+        final List<Integer> steps = new ArrayList<>();
+        final List<String> startPg = new ArrayList<>();
+        boolean gated = false;
+    }
+
+    private static class ApplyState {
+        ApplyPlan plan;
+        final StringBuilder msg = new StringBuilder();
+        boolean anyOk, failed, noRetry, expected, onPressed;
+        int doneSteps;
+        long offAt;
+    }
+
     /**
-     * 수정 사항 적용: 기기 하나의 변경을 단계(끄기 / 켜기 / 실행 / 복부 멈춤)로 나눠 차례로 한다.
+     * 수정 사항 적용: 기기 하나의 변경을 단계(끄기 / 켜기 / 실행 / 복부 멈춤)로 나눈다.
      *  - 척추·복부 모두 해제 → 전원 끄기
      *  - 척추 해제(복부는 선택) → 전원 끄기 → 켜기 → 복부만 실행  (척추만 멈추는 방법이 없어서 전원을 껐다 켬)
      *  - 복부만 해제 → 복부 ▶를 눌러 멈춤
      *  - 새로 고른 부위 → (켜기) → 실행
      * 화면에서 고르지 않은 단계가 필요하면 그 기기는 그대로 두고 '수정됨'으로 남긴다.
      */
-    private Result doApply(Config c, String name, boolean relaunch, int dev) {
+    private ApplyPlan planApply(Config c, int dev, boolean aOff, boolean aOn, boolean aRun) {
         boolean sp = c.selSpine.contains(dev), ab = c.selAbd.contains(dev);
         boolean bsp = c.baseSpine.contains(dev), bab = c.baseAbd.contains(dev);
-        final boolean aOff = applyOff, aOn = applyOn, aRun = applyRun;
-        List<Integer> steps = new ArrayList<>();
-        List<String> startPg = new ArrayList<>();
-        boolean gated = false;
+        ApplyPlan p = new ApplyPlan();
         if (!sp && !ab) {
             if (bsp || bab) {
-                if (aOff) steps.add(MODE_OFF);
-                else gated = true;
+                if (aOff) p.steps.add(MODE_OFF);
+                else p.gated = true;
             }
         } else if (bsp && !sp) {
             if (aOff) {
-                steps.add(MODE_OFF);
+                p.steps.add(MODE_OFF);
                 if (ab) {
                     if (aOn && aRun) {
-                        steps.add(MODE_ON);
-                        startPg.add("2");
-                        steps.add(MODE_RUN);
+                        p.steps.add(MODE_ON);
+                        p.startPg.add("2");
+                        p.steps.add(MODE_RUN);
                     } else {
-                        gated = true;
+                        p.gated = true;
                     }
                 }
             } else {
-                gated = true;
+                p.gated = true;
             }
         } else {
             if (bab && !ab) {
-                if (aOff) steps.add(MODE_STOP_ABD);
-                else gated = true;
+                if (aOff) p.steps.add(MODE_STOP_ABD);
+                else p.gated = true;
             }
-            if (sp && !bsp) startPg.add("1");
-            if (ab && !bab) startPg.add("2");
-            if (!startPg.isEmpty()) {
+            if (sp && !bsp) p.startPg.add("1");
+            if (ab && !bab) p.startPg.add("2");
+            if (!p.startPg.isEmpty()) {
                 if (aRun) {
-                    if (aOn) steps.add(MODE_ON);
-                    steps.add(MODE_RUN);
+                    if (aOn) p.steps.add(MODE_ON);
+                    p.steps.add(MODE_RUN);
                 } else {
-                    gated = true;
+                    p.gated = true;
                 }
             }
         }
-        if (steps.isEmpty()) {
-            Result none = Result.skip(gated ? "고른 단계로는 할 수 없음 — 수정됨으로 남김" : "바뀐 부분 없음");
-            none.keepModified = gated;
-            return none;
+        return p;
+    }
+
+    private Result stepOnce(Config c, int m, String name, boolean rel, int dev, List<String> pg) {
+        pagesOverride = pg;
+        try {
+            return doDevice(c, m, name, rel, dev);
+        } finally {
+            pagesOverride = null;
         }
-        StringBuilder msg = new StringBuilder();
-        boolean anyOk = false;
-        boolean rel = relaunch;
-        for (int k = 0; k < steps.size() && !stopRequested; k++) {
-            if (k > 0) rel = !returnToList(c);
-            int m = steps.get(k);
-            if (m == MODE_ON && k > 0 && steps.get(k - 1) == MODE_OFF) {
-                // 끈 직후에 켜기를 누르면 먹지 않는다 → 10초 이상 기다렸다가 켠다
-                log("전원을 끈 뒤 10초 기다림");
-                for (int w = 0; w < 20 && !stopRequested; w++) sleep(500);
+    }
+
+    private boolean phaseNeeds(ApplyState s, int phase) {
+        if (s.failed) return false;
+        if (phase == MODE_OFF) return s.plan.steps.contains(MODE_OFF) || s.plan.steps.contains(MODE_STOP_ABD);
+        return s.plan.steps.contains(phase);
+    }
+
+    /**
+     * 수정 사항 적용을 기기마다 순서대로 하지 않고 단계별로 묶어서 한다:
+     *   1) 끄기가 필요한 기기를 모두 끈다 → 2) (끈 지 10초가 지나면) 모두 켠다 → 3) 켜진 기기에 차례로 실행.
+     */
+    private java.util.Map<Integer, Result> runApplyBatch(Config c, List<Integer> devices) {
+        final boolean aOff = applyOff, aOn = applyOn, aRun = applyRun;
+        java.util.Map<Integer, ApplyState> st = new java.util.LinkedHashMap<>();
+        for (int d : devices) {
+            ApplyState s = new ApplyState();
+            s.plan = planApply(c, d, aOff, aOn, aRun);
+            st.put(d, s);
+        }
+        boolean[] rel = {true};
+        int[] phases = {MODE_OFF, MODE_ON, MODE_RUN};
+        for (int phase : phases) {
+            if (stopRequested) break;
+            int total = 0;
+            for (int d : devices) if (phaseNeeds(st.get(d), phase)) total++;
+            int idx = 0;
+            for (int d : devices) {
                 if (stopRequested) break;
-            }
-            pagesOverride = m == MODE_RUN ? startPg : null;
-            Result r;
-            try {
-                r = doDevice(c, m, name, rel, dev);
-            } finally {
-                pagesOverride = null;
-            }
-            // 켠 직후에는 목록 글자가 잠깐 '전원 꺼짐'으로 남아 있을 수 있다 → 기다렸다가 다시 시도
-            int tries = 0;
-            while (m == MODE_RUN && k > 0 && steps.get(k - 1) == MODE_ON && r.kind == Result.FAIL
-                    && r.msg != null && r.msg.contains("전원이 꺼져") && tries < 3 && !stopRequested) {
-                tries++;
-                log("실행하려는데 아직 꺼져 있음 — 켜기부터 다시 시도 (" + tries + "/3)");
-                sleep(5000);
-                // 켜기가 먹지 않았을 수 있으니 켜기를 다시 확인한다 (이미 켜져 있으면 아무것도 누르지 않음)
-                Result again = doDevice(c, MODE_ON, name, true, dev);
-                if (again.setBits != 0 || again.clearBits != 0) Config.updateStatus(this, dev, again.setBits, again.clearBits);
-                log("켜기 확인: " + again.msg);
-                sleep(pick(1800, 1200, 800));
-                pagesOverride = startPg;
-                try {
-                    r = doDevice(c, m, name, true, dev);
-                } finally {
-                    pagesOverride = null;
+                ApplyState s = st.get(d);
+                if (!phaseNeeds(s, phase)) continue;
+                idx++;
+                String name = c.deviceName(d);
+                String pl = phase == MODE_OFF ? "끄기" : phase == MODE_ON ? "켜기" : "실행";
+                toast(pl + " " + idx + "/" + total + "  " + name);
+                log("── " + name + " · " + pl);
+                applyPhaseStep(c, s, d, name, phase, rel);
+                rel[0] = stopRequested || !returnToList(c);
+                if (rel[0] && !stopRequested) {
+                    issues++;
+                    relaunchReason = name + " 뒤 목록으로 돌아오지 못함";
+                    log("⚠ 뒤로가기 3번으로도 목록에 못 돌아옴 → 다음 기기에서 세라젬 앱을 새로 엶");
                 }
             }
-            if (r.setBits != 0 || r.clearBits != 0) Config.updateStatus(this, dev, r.setBits, r.clearBits);
-            String label = m == MODE_OFF ? "끄기" : m == MODE_ON ? "켜기" : m == MODE_RUN ? "실행" : "복부 멈춤";
-            if (msg.length() > 0) msg.append(" → ");
-            msg.append(label).append(": ").append(r.msg);
-            if (r.kind == Result.FAIL) {
-                Result f = Result.fail(msg.toString());
-                if (anyOk || r.noRetry) f.noRetry();
-                if (r.expected) f.expected();
-                f.keepModified = true;
-                return f;
-            }
-            if (r.kind == Result.OK) anyOk = true;
-            if (m == MODE_ON) sleep(pick(1800, 1200, 800));
         }
-        Result res = anyOk ? Result.ok(msg.toString()) : Result.skip(msg.toString());
-        res.keepModified = gated || stopRequested;   // 중간에 멈췄으면 다 적용된 게 아니므로 '수정됨'으로 남김
-        return res;
+        java.util.Map<Integer, Result> out = new java.util.LinkedHashMap<>();
+        for (int d : devices) {
+            ApplyState s = st.get(d);
+            int total = s.plan.steps.size();
+            Result r;
+            if (total == 0) {
+                r = Result.skip(s.plan.gated ? "고른 단계로는 할 수 없음 — 수정됨으로 남김" : "바뀐 부분 없음");
+                r.keepModified = s.plan.gated;
+            } else if (s.failed) {
+                r = Result.fail(s.msg.toString());
+                r.noRetry();
+                if (s.expected) r.expected();
+                r.keepModified = true;
+            } else {
+                r = s.anyOk ? Result.ok(s.msg.toString()) : Result.skip(s.msg.toString());
+                r.keepModified = s.plan.gated || s.doneSteps < total;   // 중간에 멈췄거나 못 한 단계가 있으면 '수정됨'으로 남김
+            }
+            out.put(d, r);
+        }
+        return out;
+    }
+
+    private void applyPhaseStep(Config c, ApplyState s, int dev, String name, int phase, boolean[] rel) {
+        int m = phase == MODE_OFF ? (s.plan.steps.contains(MODE_OFF) ? MODE_OFF : MODE_STOP_ABD) : phase;
+        String label = m == MODE_OFF ? "끄기" : m == MODE_ON ? "켜기" : m == MODE_RUN ? "실행" : "복부 멈춤";
+        Result r = null;
+        if (m == MODE_ON) {
+            waitOffGap(s);
+            if (stopRequested) return;
+            r = stepOnce(c, m, name, rel[0], dev, null);
+            if (r.kind != Result.FAIL) s.onPressed = true;
+        } else if (m == MODE_RUN) {
+            r = runStartLadder(c, s, dev, name, rel);
+        } else {
+            // 끄기 / 복부 멈춤: 바뀌는 것을 잠깐 보고, 안 바뀌면 목록으로 갔다가 다시 확인 → 그래도 안 바뀌면 앱을 새로 열어 확인
+            for (int a = 0; a < 3 && !stopRequested; a++) {
+                if (a == 1) rel[0] = !returnToList(c);
+                if (a == 2) rel[0] = true;
+                r = stepOnce(c, m, name, rel[0], dev, null);
+                if (!r.unverified) break;
+                log("꺼짐이 확인되지 않아 " + (a == 0 ? "목록으로 돌아가 다시 확인" : "앱을 새로 열어 다시 확인"));
+            }
+            if (r != null && r.unverified) {
+                r = Result.fail("전원 버튼을 눌렀지만 꺼짐이 확인되지 않음");
+                r.noRetry();
+            }
+        }
+        if (r == null) return;
+        if (r.setBits != 0 || r.clearBits != 0) Config.updateStatus(this, dev, r.setBits, r.clearBits);
+        if (s.msg.length() > 0) s.msg.append(" → ");
+        s.msg.append(label).append(": ").append(r.msg);
+        if (m == MODE_OFF && r.kind == Result.OK) s.offAt = System.currentTimeMillis();
+        if (r.kind == Result.FAIL) {
+            s.failed = true;
+            if (r.noRetry) s.noRetry = true;
+            if (r.expected) s.expected = true;
+            if (!stopRequested) {
+                issues++;
+                log("❌ " + label + " 실패: " + r.msg);
+                snapshot(name + " " + label + " 실패 직후");
+            }
+        } else {
+            if (r.kind == Result.OK) s.anyOk = true;
+            s.doneSteps++;
+        }
+    }
+
+    /** 끈 지 10초가 안 지났으면 기다린다 (끈 직후에 켜기를 누르면 먹지 않음). */
+    private void waitOffGap(ApplyState s) {
+        if (s.offAt <= 0) return;
+        long wait = s.offAt + 10500 - System.currentTimeMillis();
+        if (wait <= 0) return;
+        log("전원을 끈 지 10초가 안 지나 " + (wait / 1000 + 1) + "초 기다림");
+        for (long w = 0; w < wait && !stopRequested; w += 250) sleep(250);
+    }
+
+    /** 실행 단계: 켠 직후라 아직 꺼져 있으면 켜기를 다시 확인하고, ▶ 뒤 상태가 안 바뀌면 목록 복귀 → 앱 재실행 순으로 다시 본다. */
+    private Result runStartLadder(Config c, ApplyState s, int dev, String name, boolean[] rel) {
+        Result r;
+        int vt = 0, onTry = 0;
+        try {
+            while (true) {
+                verifyStart = true;
+                tapPress = vt == 1;
+                afterPowerOn = s.onPressed;
+                r = stepOnce(c, MODE_RUN, name, rel[0], dev, s.plan.startPg);
+                if (stopRequested) break;
+                if (r.kind == Result.FAIL && r.expected && r.msg != null && r.msg.contains("전원이 꺼져")
+                        && s.onPressed && onTry < 3) {
+                    onTry++;
+                    log("실행하려는데 아직 꺼져 있음 — 켜기를 다시 확인 (" + onTry + "/3)");
+                    afterPowerOn = false;
+                    verifyStart = false;
+                    rel[0] = !returnToList(c);
+                    waitOffGap(s);
+                    Result again = stepOnce(c, MODE_ON, name, rel[0], dev, null);
+                    log("켜기 확인: " + again.msg);
+                    if (again.setBits != 0 || again.clearBits != 0) Config.updateStatus(this, dev, again.setBits, again.clearBits);
+                    rel[0] = !returnToList(c);
+                    for (int w = 0; w < 14 && !stopRequested; w++) sleep(250);   // 켜지는 시간
+                    continue;
+                }
+                if (r.unverified && vt < 2) {
+                    vt++;
+                    log("시작이 확인되지 않아 " + (vt == 1 ? "목록으로 돌아가 다시 확인" : "앱을 새로 열어 다시 확인"));
+                    rel[0] = vt == 2 || !returnToList(c);
+                    continue;
+                }
+                break;
+            }
+        } finally {
+            verifyStart = false;
+            tapPress = false;
+            afterPowerOn = false;
+        }
+        return r;
     }
 
     private Result doDeviceInner(Config c, int mode, String name, boolean relaunch, int dev) {
@@ -549,7 +691,8 @@ public class MacroService extends AccessibilityService {
                 return r;
             }
         } else {
-            if (off) return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
+            // 방금 전원 켜기를 눌렀다면 목록 글자가 아직 '전원 꺼짐'일 수 있으니 기기 화면에서 판단한다
+            if (off && !afterPowerOn) return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
         }
 
         // 기기 화면이 열렸는지: 꺼진 화면(가운데 전원) 또는 켜진 화면(오른쪽 위 전원·▶·뒤로) 중 하나.
@@ -587,6 +730,17 @@ public class MacroService extends AccessibilityService {
         // 실행·모드 변경: 기기 화면이 '전원을 켜 주세요'면 꺼진 것(목록 글자가 늦게 바뀐 경우)
         if (mode != MODE_ON && mode != MODE_OFF) {
             sleep(pick(500, 300, 150));
+            if (mode == MODE_RUN && afterPowerOn) {
+                // 방금 켠 기기: 켜지는 중이면 다 켜질 때까지(최대 12초) 기다린다. 아직 꺼진 화면이면 바로 아래에서 처리.
+                waitFor(() -> {
+                    boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
+                    boolean booting = textContaining("켜는 중") != null;
+                    AccessibilityNodeInfo b = findById(ID_POWER_OFF);
+                    if (b != null && b.isVisibleToUser() && !msg && !booting) return b;
+                    if (msg && !booting) return getRootInActiveWindow();
+                    return null;
+                }, 12000);
+            }
             if (visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null) {
                 if (mode == MODE_CHECK) {
                     Result r = Result.skip("전원 꺼짐");
@@ -599,6 +753,11 @@ public class MacroService extends AccessibilityService {
                     return r;
                 }
                 return Result.fail("전원이 꺼져 있음 — 먼저 켜기").expected();
+            }
+            if (mode == MODE_RUN && textContaining("켜는 중") != null) {
+                log("기기가 켜지는 중 — 켜질 때까지 기다림");
+                waitFor(() -> textContaining("켜는 중") == null ? getRootInActiveWindow() : null, 15000);
+                sleep(pick(800, 500, 300));
             }
         }
 
@@ -626,31 +785,9 @@ public class MacroService extends AccessibilityService {
             if (power == null) return Result.fail("가운데 전원 버튼을 찾지 못함");
             if (onScreen && !offMsg) return Result.skip("이미 켜져 있음");
             if (!clickNode(power)) return Result.fail("전원 버튼을 누르지 못함");
-            // 켜지면 오른쪽 위 전원 버튼이 생기고 '전원을 켜 주세요'가 사라진다
-            AccessibilityNodeInfo on = waitFor(() -> {
-                AccessibilityNodeInfo b = findById(ID_POWER_OFF);
-                boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
-                if (b != null && b.isVisibleToUser() && !msg) return b;
-                return textContaining("켜는 중");     // '전원을 켜는 중입니다' — 켜지는 중
-            }, pick(5000, 4000, 3000));
-            if (on != null) {
-                boolean ready = on.getViewIdResourceName() != null && on.getViewIdResourceName().endsWith("do_power_off");
-                if (!ready) {
-                    // '켜는 중'이면 다 켜질 때까지 기다린다 (바로 다음 단계가 '전원이 꺼져 있음'으로 실패하지 않도록)
-                    AccessibilityNodeInfo up = waitFor(() -> {
-                        AccessibilityNodeInfo b = findById(ID_POWER_OFF);
-                        boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
-                        boolean booting = textContaining("켜는 중") != null;
-                        return (b != null && b.isVisibleToUser() && !msg && !booting) ? b : null;
-                    }, 15000);
-                    ready = up != null;
-                }
-                return Result.ok(ready ? "켰음" : "켜는 중");
-            }
-            issues++;
-            log("전원 버튼을 눌렀지만 켜진 화면이 확인되지 않음");
-            snapshot("켜기 확인 실패");
-            return Result.ok("전원 버튼 누름 (켜짐 확인 안 됨)");
+            // 켜지는 것은 기다리지 않는다: 눌렀으면 바로 다음 기기로 (켜졌는지는 실행 단계·점검에서 본다)
+            sleep(pick(500, 350, 250));
+            return Result.ok("전원 켬 (켜지는 것은 기다리지 않음)");
         }
         if (mode == MODE_OFF) {
             sleep(pick(800, 400, 200));
@@ -673,13 +810,17 @@ public class MacroService extends AccessibilityService {
                 return Result.fail("전원 버튼을 누르지 못함");
             }
             confirmDialogIfAny();
+            // '끄는 중'이나 '전원을 켜 주세요'로 바뀌면 바로 다음 기기로
             AccessibilityNodeInfo done = waitFor(() -> {
                 AccessibilityNodeInfo a = visibleText("전원을 켜 주세요");
                 if (a == null) a = visibleText("전원을 켜주세요");
                 if (a == null) a = textContaining("끄는 중");
                 return a;
-            }, pick(7000, 6000, 5000));
-            return done != null ? Result.ok("껐음") : Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
+            }, pick(3500, 3000, 2500));
+            if (done != null) return Result.ok("껐음");
+            Result nr = Result.ok("전원 버튼 누름 (꺼짐 확인 안 됨)");
+            nr.unverified = true;
+            return nr;
         }
         if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) return changeSpineMode(c);
         if (mode == MODE_CHECK) return checkDevice(c);
@@ -1028,10 +1169,13 @@ public class MacroService extends AccessibilityService {
             // ▶가 없어도 가운데 페이지의 상태 글자는 읽을 수 있다. (척추 스캔중에는 ▶ 자리에 '스캔 재시도'가 있음)
             String[] ct0 = centeredPageTexts();
             if (target > 1) {
+                // 페이지가 완전히 자리 잡은 뒤에 읽고 누른다 (넘기자마자 누르면 먹지 않는 것으로 보임)
+                sleep(pick(600, 400, 250));
+                ct0 = centeredPageTexts();
                 // 앞 페이지(척추)의 '스캔 대기·척추 스캔중'이 비쳐 보이는 동안은 이 페이지의 진짜 상태가 아니다.
-                // 진짜 글자로 바뀔 때까지 기다린다.
+                // 진짜 글자로 바뀔 때까지 잠깐만 기다린다.
                 long tw = System.currentTimeMillis();
-                long lim = readOnly ? 2500 : (stopSet != null && stopSet.contains(target)) ? 4000 : 8000;
+                long lim = 2500;
                 while (!stopRequested && System.currentTimeMillis() - tw < lim
                         && (!ct0[0].trim().equals(want) || isScanMirror(ct0[1]))) {
                     sleep(150);
@@ -1049,7 +1193,10 @@ public class MacroService extends AccessibilityService {
             final boolean unknown = target > 1 && (!ct[0].trim().equals(want) || isScanMirror(ct[1]));
             final boolean runningNow = target == 1 ? (!cst.isEmpty() && !cst.equals("마사지대기"))
                     : (!unknown && !cst.equals("마사지대기"));
-            log(target + "번 페이지: '" + ct[0] + "' 상태 '" + ct[1] + "'" + (unknown ? " (읽을 수 없음)" : ""));
+            // 이번에 우리가 척추 ▶를 눌렀다면 복부 쪽에 비친 '스캔 대기'는 우리가 만든 것 → 그대로 복부 ▶를 누른다
+            final boolean startAnyway = target > 1 && unknown && !isStop && !readOnly && !started.isEmpty()
+                    && ct[0].trim().equals(want);
+            log(target + "번 페이지: '" + ct[0] + "' 상태 '" + ct[1] + "'" + (unknown ? (startAnyway ? " (척추를 방금 눌러서 비친 글자)" : " (읽을 수 없음)") : ""));
             if (readOnly) {
                 visited.add(want);
                 if (unknown) {
@@ -1061,7 +1208,7 @@ public class MacroService extends AccessibilityService {
                 seen.add(clabel + (runningNow ? " 작동 중(" + ct[1].trim() + ")" : " 멈춤"));
                 continue;
             }
-            if (target > 1 && unknown) {
+            if (target > 1 && unknown && !startAnyway) {
                 // 상태를 모르면 ▶를 누르지 않는다 (작동 중인 것을 멈추거나, 엉뚱한 것을 시작하지 않기 위해)
                 issues++;
                 log("⚠ " + target + "번 페이지 상태를 읽지 못해 누르지 않음 ('" + ct[1] + "')");
@@ -1106,7 +1253,14 @@ public class MacroService extends AccessibilityService {
             String[] ts = pageTexts(play);
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
-            if (target > 1) {
+            if (startAnyway) {
+                if (!(ts[0].trim().equals(want) && centeredTitle().equals(want))) {
+                    issues++;
+                    log("⚠ " + target + "번 페이지 ▶ 누르기 직전 이름 확인 실패 ('" + ts[0] + "')");
+                    failed.add(label + " 확인 실패 — 누르지 않음");
+                    continue;
+                }
+            } else if (target > 1) {
                 // 누르기 직전에 한 번 더: 이 ▶가 이 페이지 것이고 상태가 읽은 그대로인지
                 boolean titleOk = ts[0].trim().equals(want) && centeredTitle().equals(want);
                 boolean mirror = isScanMirror(ts[1]);
@@ -1145,16 +1299,37 @@ public class MacroService extends AccessibilityService {
                 setB |= bit;
                 continue;
             }
-            if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            if (!pressPlay(play)) {
                 failed.add(label + " ▶ 누르기 실패");
                 continue;
             }
-            // 누른 뒤 상태 확인은 하지 않는다 (확인은 '점검'에서)
+            if (verifyStart) {
+                // 수정 사항 적용: 상태 글자가 '마사지 대기'에서 바뀌는지 잠깐 본다 (바뀌면 바로 다음으로)
+                boolean changed = false;
+                long tv = System.currentTimeMillis();
+                while (!stopRequested && System.currentTimeMillis() - tv < 3000) {
+                    sleep(250);
+                    String[] now = centeredPageTexts();
+                    if (now[0].trim().equals(want) && !norm(now[1]).isEmpty() && !norm(now[1]).equals("마사지대기")) {
+                        changed = true;
+                        log(label + " ▶ 누름 → 상태 '" + now[1].trim() + "' (" + (System.currentTimeMillis() - tv) + "ms)");
+                        break;
+                    }
+                }
+                if (!changed) {
+                    log("⚠ " + label + " ▶ 눌렀지만 3초 동안 상태가 안 바뀜" + (tapPress ? " (터치로 누름)" : ""));
+                    unsure.add(label);
+                    continue;
+                }
+                started.add(label);
+                setB |= bit;
+                continue;
+            }
+            // 일반 실행: 누른 뒤 상태 확인은 하지 않는다 (확인은 '점검'에서)
             log(label + " ▶ 누름 (확인은 점검에서)");
             started.add(label);
             setB |= bit;
-            sleep(pick(1000, 700, 450));
-            log(target + "번 페이지 누른 뒤 보이는 글자(참고용): '" + centeredPageTexts()[1] + "'");
+            sleep(pick(500, 350, 250));
         }
 
         if (readOnly) {
@@ -1182,6 +1357,11 @@ public class MacroService extends AccessibilityService {
             msg.append(msg.length() > 0 ? " / " : "").append(String.join(", ", failed));
             Result f = Result.fail(msg.toString());
             res = (started.isEmpty() && unsure.isEmpty() && stopped.isEmpty() && !pressedStop) ? f : f.noRetry();
+            res.unverified = verifyStart && !unsure.isEmpty();
+        } else if (verifyStart && !unsure.isEmpty()) {
+            res = Result.fail(msg.toString());
+            res.noRetry();
+            res.unverified = true;
         } else if (started.isEmpty() && unsure.isEmpty() && stopped.isEmpty()) {
             res = Result.skip(msg.toString());
         } else {
@@ -1190,6 +1370,19 @@ public class MacroService extends AccessibilityService {
         res.setBits = setB;
         res.clearBits = clrB;
         return res;
+    }
+
+    /** ▶ 누르기. tapPress면 실제 터치로(화면 안에 있을 때), 아니면 접근성 클릭으로. */
+    private boolean pressPlay(AccessibilityNodeInfo play) {
+        if (tapPress) {
+            Rect r = new Rect();
+            play.getBoundsInScreen(r);
+            Rect sr = screenRect();
+            if (!r.isEmpty() && sr != null && sr.contains(r.centerX(), r.centerY())) {
+                return tap(r.centerX(), r.centerY());
+            }
+        }
+        return play.performAction(AccessibilityNodeInfo.ACTION_CLICK);
     }
 
     /** 복부(2번 페이지)만 멈춘다. 이미 멈춰 있으면 누르지 않는다. */
