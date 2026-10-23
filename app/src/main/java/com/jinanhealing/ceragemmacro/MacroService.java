@@ -468,12 +468,37 @@ public class MacroService extends AccessibilityService {
         for (int k = 0; k < steps.size() && !stopRequested; k++) {
             if (k > 0) rel = !returnToList(c);
             int m = steps.get(k);
+            if (m == MODE_ON && k > 0 && steps.get(k - 1) == MODE_OFF) {
+                // 끈 직후에 켜기를 누르면 먹지 않는다 → 10초 이상 기다렸다가 켠다
+                log("전원을 끈 뒤 10초 기다림");
+                for (int w = 0; w < 20 && !stopRequested; w++) sleep(500);
+                if (stopRequested) break;
+            }
             pagesOverride = m == MODE_RUN ? startPg : null;
             Result r;
             try {
                 r = doDevice(c, m, name, rel, dev);
             } finally {
                 pagesOverride = null;
+            }
+            // 켠 직후에는 목록 글자가 잠깐 '전원 꺼짐'으로 남아 있을 수 있다 → 기다렸다가 다시 시도
+            int tries = 0;
+            while (m == MODE_RUN && k > 0 && steps.get(k - 1) == MODE_ON && r.kind == Result.FAIL
+                    && r.msg != null && r.msg.contains("전원이 꺼져") && tries < 3 && !stopRequested) {
+                tries++;
+                log("실행하려는데 아직 꺼져 있음 — 켜기부터 다시 시도 (" + tries + "/3)");
+                sleep(5000);
+                // 켜기가 먹지 않았을 수 있으니 켜기를 다시 확인한다 (이미 켜져 있으면 아무것도 누르지 않음)
+                Result again = doDevice(c, MODE_ON, name, true, dev);
+                if (again.setBits != 0 || again.clearBits != 0) Config.updateStatus(this, dev, again.setBits, again.clearBits);
+                log("켜기 확인: " + again.msg);
+                sleep(pick(1800, 1200, 800));
+                pagesOverride = startPg;
+                try {
+                    r = doDevice(c, m, name, true, dev);
+                } finally {
+                    pagesOverride = null;
+                }
             }
             if (r.setBits != 0 || r.clearBits != 0) Config.updateStatus(this, dev, r.setBits, r.clearBits);
             String label = m == MODE_OFF ? "끄기" : m == MODE_ON ? "켜기" : m == MODE_RUN ? "실행" : "복부 멈춤";
@@ -608,8 +633,20 @@ public class MacroService extends AccessibilityService {
                 if (b != null && b.isVisibleToUser() && !msg) return b;
                 return textContaining("켜는 중");     // '전원을 켜는 중입니다' — 켜지는 중
             }, pick(5000, 4000, 3000));
-            if (on != null) return Result.ok(on.getViewIdResourceName() != null && on.getViewIdResourceName().endsWith("do_power_off")
-                    ? "켰음" : "켜는 중");
+            if (on != null) {
+                boolean ready = on.getViewIdResourceName() != null && on.getViewIdResourceName().endsWith("do_power_off");
+                if (!ready) {
+                    // '켜는 중'이면 다 켜질 때까지 기다린다 (바로 다음 단계가 '전원이 꺼져 있음'으로 실패하지 않도록)
+                    AccessibilityNodeInfo up = waitFor(() -> {
+                        AccessibilityNodeInfo b = findById(ID_POWER_OFF);
+                        boolean msg = visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null;
+                        boolean booting = textContaining("켜는 중") != null;
+                        return (b != null && b.isVisibleToUser() && !msg && !booting) ? b : null;
+                    }, 15000);
+                    ready = up != null;
+                }
+                return Result.ok(ready ? "켰음" : "켜는 중");
+            }
             issues++;
             log("전원 버튼을 눌렀지만 켜진 화면이 확인되지 않음");
             snapshot("켜기 확인 실패");
@@ -957,6 +994,9 @@ public class MacroService extends AccessibilityService {
                     break;
                 }
                 visited.add(before);
+                if (current == 1 && !pages.contains(1)) {
+                    log("1번 페이지(누르지 않음) 상태 '" + centeredPageTexts()[1] + "'");
+                }
                 if (!scrollModePager(true)) swipeCarousel(true);
                 AccessibilityNodeInfo moved = waitFor(() -> {
                     String t = centeredTitle();
@@ -986,19 +1026,47 @@ public class MacroService extends AccessibilityService {
             final String pidW = pid;
             final String want = centeredTitle();
             // ▶가 없어도 가운데 페이지의 상태 글자는 읽을 수 있다. (척추 스캔중에는 ▶ 자리에 '스캔 재시도'가 있음)
-            final String[] ct = centeredPageTexts();
+            String[] ct0 = centeredPageTexts();
+            if (target > 1) {
+                // 앞 페이지(척추)의 '스캔 대기·척추 스캔중'이 비쳐 보이는 동안은 이 페이지의 진짜 상태가 아니다.
+                // 진짜 글자로 바뀔 때까지 기다린다.
+                long tw = System.currentTimeMillis();
+                long lim = readOnly ? 2500 : (stopSet != null && stopSet.contains(target)) ? 4000 : 8000;
+                while (!stopRequested && System.currentTimeMillis() - tw < lim
+                        && (!ct0[0].trim().equals(want) || isScanMirror(ct0[1]))) {
+                    sleep(150);
+                    ct0 = centeredPageTexts();
+                }
+            }
+            final String[] ct = ct0;
             final String cst = norm(ct[1]);
             final String clabel = ct[0].trim().isEmpty() ? target + "번" : ct[0].trim();
             final int bit = target == 1 ? Config.ST_SPINE : target == 2 ? Config.ST_ABD : 0;
             final boolean isStop = stopSet != null && stopSet.contains(target);
-            // 척추(1번): 대기가 아닌 모든 글자(스캔 대기·척추 스캔중·마사지 중) = 작동 중
-            // 그 밖의 페이지: '마사지 중'일 때만 작동 중
-            final boolean runningNow = target == 1 ? (!cst.isEmpty() && !cst.equals("마사지대기")) : cst.equals("마사지중");
-            log(target + "번 페이지: '" + ct[0] + "' 상태 '" + ct[1] + "'");
+            // 척추(1번): 대기가 아닌 모든 글자(스캔 대기·척추 스캔중·마사지 중·N분남음) = 작동 중
+            // 그 밖의 페이지: '마사지 대기' = 멈춤, '마사지 중'·'N분남음 / N분' 같은 글자 = 작동 중,
+            //                 앞 페이지가 비친 글자나 빈 글자 = 알 수 없음 (알 수 없으면 누르지도, 멈추지도 않는다)
+            final boolean unknown = target > 1 && (!ct[0].trim().equals(want) || isScanMirror(ct[1]));
+            final boolean runningNow = target == 1 ? (!cst.isEmpty() && !cst.equals("마사지대기"))
+                    : (!unknown && !cst.equals("마사지대기"));
+            log(target + "번 페이지: '" + ct[0] + "' 상태 '" + ct[1] + "'" + (unknown ? " (읽을 수 없음)" : ""));
             if (readOnly) {
+                visited.add(want);
+                if (unknown) {
+                    seen.add(clabel + " 상태를 읽지 못함(" + ct[1].trim() + ")");
+                    continue;
+                }
                 readMask |= bit;
                 if (runningNow) readBits |= bit;
                 seen.add(clabel + (runningNow ? " 작동 중(" + ct[1].trim() + ")" : " 멈춤"));
+                continue;
+            }
+            if (target > 1 && unknown) {
+                // 상태를 모르면 ▶를 누르지 않는다 (작동 중인 것을 멈추거나, 엉뚱한 것을 시작하지 않기 위해)
+                issues++;
+                log("⚠ " + target + "번 페이지 상태를 읽지 못해 누르지 않음 ('" + ct[1] + "')");
+                snapshot(target + "번 페이지 상태 읽기 실패");
+                failed.add(clabel + " 상태를 읽지 못해 누르지 않음");
                 visited.add(want);
                 continue;
             }
@@ -1008,11 +1076,24 @@ public class MacroService extends AccessibilityService {
                 visited.add(want);
                 continue;
             }
+            if (isStop && !runningNow) {
+                idle.add(clabel);
+                clrB |= bit;
+                visited.add(want);
+                continue;
+            }
+            if (!isStop && target > 1 && runningNow) {
+                already.add(clabel + "(" + ct[1].trim() + ")");
+                setB |= bit;
+                visited.add(want);
+                continue;
+            }
             AccessibilityNodeInfo play = waitFor(() -> {
                 AccessibilityNodeInfo p = findCenteredById(pidW);
                 if (p == null) return null;
                 String t = pageTexts(p)[0].trim();
-                return (t.isEmpty() || t.equals(want)) ? p : null;
+                // 2번째 이후 페이지는 ▶가 '지금 가운데 이름'의 페이지 안에 있을 때만 (이름이 비어 있어도 안 누름)
+                return (t.equals(want) || (target == 1 && t.isEmpty())) ? p : null;
             }, pick(3000, 2500, 2000));
             if (play == null) {
                 issues++;
@@ -1021,24 +1102,32 @@ public class MacroService extends AccessibilityService {
                 failed.add(target + "번 페이지 ▶ 못 찾음");
                 continue;
             }
-            if (target > 1 && visited.contains(pageTexts(play)[0].trim()) && !pageTexts(play)[0].trim().equals(want)) {
-                issues++;
-                log("⚠ " + target + "번 페이지 ▶가 앞 페이지 것으로 보여 누르지 않음");
-                snapshot(target + "번 페이지 ▶ 확인 실패");
-                failed.add(target + "번 페이지 확인 실패");
-                continue;
-            }
             visited.add(want);
             String[] ts = pageTexts(play);
             String label = ts[0].isEmpty() ? target + "번" : ts[0];
             String st = norm(ts[1]);
-            log(target + "번 페이지: '" + ts[0] + "' 상태 '" + ts[1] + "'");
-            if (isStop) {
-                if (!runningNow) {
-                    idle.add(label);
-                    clrB |= bit;
+            if (target > 1) {
+                // 누르기 직전에 한 번 더: 이 ▶가 이 페이지 것이고 상태가 읽은 그대로인지
+                boolean titleOk = ts[0].trim().equals(want) && centeredTitle().equals(want);
+                boolean mirror = isScanMirror(ts[1]);
+                boolean idleNow = st.equals("마사지대기");
+                if (!titleOk || mirror || (isStop ? idleNow : !idleNow)) {
+                    if (titleOk && !mirror && isStop && idleNow) {
+                        idle.add(label);
+                        clrB |= bit;
+                    } else if (titleOk && !mirror && !isStop && !idleNow) {
+                        already.add(label + "(" + ts[1].trim() + ")");
+                        setB |= bit;
+                    } else {
+                        issues++;
+                        log("⚠ " + target + "번 페이지 ▶ 누르기 직전 확인 실패 (이름 '" + ts[0] + "', 상태 '" + ts[1] + "')");
+                        snapshot(target + "번 페이지 ▶ 확인 실패");
+                        failed.add(label + " 확인 실패 — 누르지 않음");
+                    }
                     continue;
                 }
+            }
+            if (isStop) {
                 if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                     failed.add(label + " 멈추기 누르기 실패");
                     continue;
@@ -1051,38 +1140,9 @@ public class MacroService extends AccessibilityService {
                 clrB |= bit;
                 continue;
             }
-            // 2번째 이후 페이지(음파 진동 등): '마사지 중'일 때만 작동 중으로 보고,
-            // 그 밖의 글자(마사지 대기, 앞 페이지에서 비친 스캔 대기·척추 스캔중 등)면 기다리지 않고 바로 ▶
-            if (target > 1 && !st.equals("마사지중") && !st.equals("마사지대기")) {
-                // 앞 페이지의 '스캔 대기'가 비친 상태에서는 ▶가 먹지 않는다(10/22 기록: 03·08·09).
-                // 고정 대기가 아니라 '마사지 대기'로 바뀌는 즉시 넘어간다.
-                final String pidS = pid, wantS = want;
-                long t0 = System.currentTimeMillis();
-                AccessibilityNodeInfo settled = waitFor(() -> {
-                    AccessibilityNodeInfo p = findCenteredById(pidS);
-                    if (p == null) return null;
-                    String[] x = pageTexts(p);
-                    String n = norm(x[1]);
-                    return (x[0].trim().equals(wantS) && (n.equals("마사지대기") || n.equals("마사지중"))) ? p : null;
-                }, 4000);
-                if (settled != null) {
-                    play = settled;
-                    st = norm(pageTexts(play)[1]);
-                    log(target + "번 페이지 '" + ts[1] + "' → '" + pageTexts(play)[1] + "' ("
-                            + (System.currentTimeMillis() - t0) + "ms)");
-                } else {
-                    log(target + "번 페이지가 계속 '" + ts[1] + "' — 그대로 ▶");
-                    st = "마사지대기";
-                }
-            }
-            if (target > 1 && !st.equals("마사지중")) st = "마사지대기";
-            if (!st.isEmpty() && !st.equals("마사지대기")) {
+            if (target == 1 && !st.isEmpty() && !st.equals("마사지대기")) {
                 already.add(label);
                 setB |= bit;
-                if (diagAlwaysSnap < 2) {   // 한 번 실행에 두 번까지만 화면 기록
-                    diagAlwaysSnap++;
-                    snapshot(label + " '이미 작동 중'으로 판단한 화면");
-                }
                 continue;
             }
             if (!play.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
@@ -1094,6 +1154,7 @@ public class MacroService extends AccessibilityService {
             started.add(label);
             setB |= bit;
             sleep(pick(1000, 700, 450));
+            log(target + "번 페이지 누른 뒤 보이는 글자(참고용): '" + centeredPageTexts()[1] + "'");
         }
 
         if (readOnly) {
@@ -1283,6 +1344,12 @@ public class MacroService extends AccessibilityService {
             }
         }
         return new String[]{title, status};
+    }
+
+    /** 2번째 이후 페이지의 상태 글자가 비었거나 앞 페이지(척추)의 스캔 글자가 비쳐 보이는 것이면 true. */
+    private boolean isScanMirror(String raw) {
+        String n = norm(raw);
+        return n.isEmpty() || n.contains("스캔");
     }
 
     /** ▶ 버튼이 속한 페이지의 [모드 이름, 상태 글자]. */

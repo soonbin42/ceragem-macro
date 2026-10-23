@@ -737,6 +737,10 @@ public class MainActivity extends Activity {
         mlp.setMargins(dp(3), dp(4), dp(3), 0);
         numWrap.addView(b.modDot, mlp);
 
+        // 번호를 누르면 척추·복부를 함께 선택/해제 (둘 다 선택돼 있으면 둘 다 해제, 아니면 둘 다 선택)
+        numWrap.setClickable(true);
+        numWrap.setOnClickListener(v -> toggleBoth(b));
+
         LinearLayout.LayoutParams seg1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         LinearLayout.LayoutParams seg2 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         LinearLayout.LayoutParams numLp = new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT);
@@ -783,6 +787,20 @@ public class MainActivity extends Activity {
         updateAll();
     }
 
+    private void toggleBoth(Bed b) {
+        boolean both = cfg.selSpine.contains(b.dev) && cfg.selAbd.contains(b.dev);
+        if (both) {
+            cfg.selSpine.remove(b.dev);
+            cfg.selAbd.remove(b.dev);
+        } else {
+            cfg.selSpine.add(b.dev);
+            cfg.selAbd.add(b.dev);
+        }
+        cfg.diffDevs.remove(b.dev);
+        cfg.save(this);
+        updateAll();
+    }
+
     private void setAll(boolean on) {
         cfg.selSpine.clear();
         cfg.selAbd.clear();
@@ -810,6 +828,17 @@ public class MainActivity extends Activity {
         View l2 = new View(this);
         l2.setBackgroundColor(Color.parseColor("#D6C8BA"));
         c.addView(l2, new LinearLayout.LayoutParams(dp(2), 0, 1f));
+        // 복도 맨 아래: 입구
+        TextView door = text("입\n구", 11, Color.WHITE, true);
+        door.setGravity(Gravity.CENTER);
+        door.setPadding(0, dp(5), 0, dp(5));
+        GradientDrawable dg = new GradientDrawable();
+        dg.setColor(Color.parseColor("#8A6A55"));
+        dg.setCornerRadius(dp(5));
+        door.setBackground(dg);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(20), ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp.topMargin = dp(2);
+        c.addView(door, dlp);
         return c;
     }
 
