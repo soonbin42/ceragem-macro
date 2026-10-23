@@ -404,50 +404,74 @@ public class MacroService extends AccessibilityService {
     }
 
     /**
-     * 실행. '모드 변경'을 눌러 골라 둔 속도가 있으면(한 번만) 실행 전에 속도를 바꾼다.
+     * 실행. '모드 변경'을 눌러 골라 둔 속도가 있으면(한 번만) 실행 전에 척추 모드(릴렉스)와 속도를 맞춘다.
      * 척추가 스캔 중일 때는 속도 버튼이 없어서 실행 뒤에는 바꿀 수 없다 → 아직 멈춰 있는 실행 전에 한다.
-     * 가능한 한 빠르게 하고, 속도 버튼이 없으면 기다리지 않고 건너뛴다.
+     * 모드 변경 실행에서는, 이미 작동 중이라고 알고 있는 부위의 ▶ 확인(복부 페이지 구경 등)은 생략한다.
      */
     private Result runWithSpeed(Config c, int dev) {
-        int want = c.speedPending ? c.lastSpeedIdx : -1;
-        List<String> pg = pagesOverride != null ? pagesOverride : c.pagesFor(dev);
+        final boolean modeRun = c.speedPending && c.lastSpeedIdx >= 0 && c.lastSpeedIdx <= 2;
+        final int want = modeRun ? c.lastSpeedIdx : -1;
+        List<String> pg = new ArrayList<>(pagesOverride != null ? pagesOverride : c.pagesFor(dev));
         String speedMsg = "";
-        if (want >= 0 && want <= 2 && !stopRequested && c.selSpine.contains(dev) && pg.contains("1")
-                && c.devSpeedOf(dev) != want) {
+        if (modeRun && !stopRequested && c.selSpine.contains(dev) && pg.contains("1")) {
             showModePages();
             goToFirstPage();
-            if (findCenteredOrVisible(ID_SPEED_BTN) == null) {
-                log("속도 버튼이 보이지 않아 속도 변경은 건너뜀 (상태 '" + centeredPageTexts()[1] + "')");
-                speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 건너뜀(속도 버튼 없음)";
-            } else {
-                final String target = c.changeModeName == null || c.changeModeName.trim().isEmpty()
-                        ? "릴렉스 모드" : c.changeModeName.trim();
-                final String no = c.changeModeNo == null ? "" : c.changeModeNo.trim();
-                AccessibilityNodeInfo mb = findCenteredOrVisible(ID_MODES_BTN);
-                if (mb == null) mb = findCenteredOrVisible(ID_SPINE_MODES_BTN);
-                boolean modeOk = (mb != null && !no.isEmpty() && no.equals(norm(mb.getText()))) || isModeCentered(target);
-                String sm;
-                if (modeOk) {
-                    sm = quickSpeed(want);       // 모드는 이미 맞음 → 속도만 빠르게
-                } else {
-                    speedOverride = SPEED_LABELS[want];
-                    try {
-                        Result sr = changeSpineMode(c);
-                        sm = sr.kind == Result.FAIL ? "속도 변경 실패: " + sr.msg : "속도 " + SPEED_LABELS[want];
-                    } finally {
-                        speedOverride = "";
+            final String target = c.changeModeName == null || c.changeModeName.trim().isEmpty()
+                    ? "릴렉스 모드" : c.changeModeName.trim();
+            final String no = c.changeModeNo == null ? "" : c.changeModeNo.trim();
+            AccessibilityNodeInfo mb = findCenteredOrVisible(ID_MODES_BTN);
+            if (mb == null) mb = findCenteredOrVisible(ID_SPINE_MODES_BTN);
+            boolean modeOk = (mb != null && !no.isEmpty() && no.equals(norm(mb.getText()))) || isModeCentered(target);
+            if (!modeOk) {
+                // 목·어깨 등 다른 모드 → 릴렉스로 바꾸고 속도도 맞춘다
+                speedOverride = SPEED_LABELS[want];
+                try {
+                    Result sr = changeSpineMode(c);
+                    speedMsg = sr.kind == Result.FAIL ? "모드/속도 변경 실패: " + sr.msg : sr.msg;
+                    if (sr.kind != Result.FAIL && sr.msg.contains("속도 " + SPEED_LABELS[want])) {
+                        Config.setDevSpeed(this, dev, want);
+                        c.devSpeed.put(dev, want);
                     }
+                } finally {
+                    speedOverride = "";
                 }
-                if (sm != null && sm.startsWith("속도 ") && !sm.contains("못") && !sm.contains("실패")) {
-                    Config.setDevSpeed(this, dev, want);
-                    c.devSpeed.put(dev, want);
+            } else if (c.devSpeedOf(dev) != want) {
+                if (findCenteredOrVisible(ID_SPEED_BTN) == null) {
+                    log("속도 버튼이 보이지 않아 속도 변경은 건너뜀 (상태 '" + centeredPageTexts()[1] + "')");
+                    speedMsg = "속도 " + SPEED_LABELS[want] + " 변경 건너뜀(속도 버튼 없음)";
+                } else {
+                    String sm = quickSpeed(want);
+                    if (sm != null && sm.startsWith("속도 ") && !sm.contains("못")) {
+                        Config.setDevSpeed(this, dev, want);
+                        c.devSpeed.put(dev, want);
+                    }
+                    speedMsg = sm == null ? "속도 버튼 없음" : sm;
                 }
-                speedMsg = sm == null ? "속도 버튼 없음" : sm;
+            }
+            // 모드 변경 실행: 이미 작동 중이라고 알고 있는 부위는 ▶ 확인을 하지 않는다 (점검에서 어긋남을 확인)
+            int st = c.statusOf(dev);
+            if ((st & Config.ST_POWER) != 0) {
+                if ((st & Config.ST_SPINE) != 0) pg.remove("1");
+                if ((st & Config.ST_ABD) != 0) pg.remove("2");
             }
         }
-        Result r = runMassage(c, dev);
+        Result r;
+        if (modeRun && pg.isEmpty()) {
+            log("모드 변경 실행 — 이미 작동 중으로 알고 있어 ▶ 확인은 생략");
+            r = Result.skip("이미 작동 중으로 알고 있어 ▶ 확인 생략");
+        } else {
+            List<String> saved = pagesOverride;
+            pagesOverride = pg;
+            try {
+                r = runMassage(c, dev);
+            } finally {
+                pagesOverride = saved;
+            }
+        }
         if (speedMsg.isEmpty()) return r;
-        Result out = new Result(r.kind, r.msg + " / " + speedMsg);
+        boolean skipOnly = r.kind == Result.SKIP && r.msg.startsWith("이미 작동 중으로");
+        Result out = new Result(skipOnly && !speedMsg.contains("건너뜀") && !speedMsg.contains("실패") ? Result.OK : r.kind,
+                skipOnly ? speedMsg + " (▶ 확인 생략)" : r.msg + " / " + speedMsg);
         out.setBits = r.setBits;
         out.clearBits = r.clearBits;
         out.actual = r.actual;
