@@ -82,6 +82,8 @@ public class MacroService extends AccessibilityService {
     private int diagAlwaysSnap = 0;
     /** 수정 사항 적용에서만: ▶ 누른 뒤 상태가 바뀌었는지 잠깐 본다 */
     private volatile boolean verifyStart = false;
+    /** 마지막으로 ▶(시작)를 누른 시각 — 화면이 몇 초 늦게 바뀌는 경우를 위해, 다시 확인하기 전에 이 시각부터 기다린다 */
+    private volatile long lastPlayAt = 0;
     /** ▶를 접근성 클릭 대신 실제 터치로 누른다 (다시 시도할 때) */
     private volatile boolean tapPress = false;
     /** 방금 전원 켜기를 눌렀으므로 목록의 '전원 꺼짐' 글자를 믿지 않는다 */
@@ -509,6 +511,7 @@ public class MacroService extends AccessibilityService {
         final List<Integer> steps = new ArrayList<>();
         final List<String> startPg = new ArrayList<>();
         boolean gated = false;
+        boolean convert = false;   // 척추+복부를 하던 기기를 복부만으로 바꾸는 경우 (꼼꼼히 확인하며 누르는 경우는 이것뿐)
     }
 
     private static class ApplyState {
@@ -517,6 +520,19 @@ public class MacroService extends AccessibilityService {
         boolean anyOk, failed, noRetry, expected, onPressed;
         int doneSteps;
         long offAt;
+        long onAt;      // 전원 켜기를 누른 시각 (켠 직후엔 ▶가 먹지 않아서, 누르기 전에 이 시각부터 기다린다)
+    }
+
+    /** 전원을 켠 뒤 ▶를 누르기까지 기다리는 최소 시간(ms). 시도 순서(0,1,2)마다 늘린다. */
+    private static final long[] READY_AFTER_ON_MS = {20000, 30000, 40000};
+
+    /** 방금 켠 기기면, 켠 지 minMs가 지날 때까지 기다린다 (다른 기기를 켜고 오는 동안 지난 시간은 포함). */
+    private void waitReadyAfterOn(ApplyState s, long minMs) {
+        if (s.onAt <= 0) return;
+        long wait = s.onAt + minMs - System.currentTimeMillis();
+        if (wait <= 0) return;
+        log("전원을 켠 지 얼마 안 돼 " + (wait / 1000 + 1) + "초 더 기다림 (켠 직후엔 ▶가 먹지 않음)");
+        for (long w = 0; w < wait && !stopRequested; w += 250) sleep(250);
     }
 
     /**
@@ -541,6 +557,7 @@ public class MacroService extends AccessibilityService {
                 p.steps.add(MODE_OFF);
                 if (ab) {
                     if (aOn && aRun) {
+                        p.convert = true;
                         p.steps.add(MODE_ON);
                         p.startPg.add("2");
                         p.steps.add(MODE_RUN);
@@ -653,6 +670,7 @@ public class MacroService extends AccessibilityService {
             if (stopRequested) return;
             r = stepOnce(c, m, name, rel[0], dev, null);
             if (r.kind != Result.FAIL) s.onPressed = true;
+            if (r.kind == Result.OK) s.onAt = System.currentTimeMillis();   // 실제로 전원을 누른 경우만 (이미 켜져 있으면 기다릴 필요 없음)
         } else if (m == MODE_RUN) {
             r = runStartLadder(c, s, dev, name, rel);
         } else {
@@ -704,9 +722,22 @@ public class MacroService extends AccessibilityService {
         int vt = 0, onTry = 0;
         try {
             while (true) {
-                verifyStart = true;
-                tapPress = vt == 1;
+                // 방금 켠 기기: 켠 직후에는 ▶가 보여도 먹지 않았다 → 켠 지 일정 시간이 지난 뒤에 누른다 (시도할수록 더 길게)
+                // 이 꼼꼼한 확인은 '척추+복부 → 복부만' 바꾸는 기기에만 한다. 다른 실행은 예전처럼 한 번 누르고 넘어간다.
+                final boolean careful = s.plan.convert;
+                if (careful) {
+                    waitReadyAfterOn(s, READY_AFTER_ON_MS[Math.min(vt, READY_AFTER_ON_MS.length - 1)]);
+                    if (vt > 0) {
+                        // 같은 화면에서 다시 누르면 시작됐던 것이 멈춘다. 화면은 몇 초 늦게 바뀌므로 그만큼 기다린 뒤, 눌러 보지 않고 상태부터 본다.
+                        long left = lastPlayAt + 8000 - System.currentTimeMillis();
+                        for (long w = 0; w < left && !stopRequested; w += 250) sleep(250);
+                    }
+                }
+                if (stopRequested) break;
+                verifyStart = careful;
+                tapPress = careful && vt == 1;
                 afterPowerOn = s.onPressed;
+                if (s.onAt > 0) log("▶ 시도 " + (vt + 1) + "번째 — 전원 켠 지 " + ((System.currentTimeMillis() - s.onAt) / 1000) + "초");
                 r = stepOnce(c, MODE_RUN, name, rel[0], dev, s.plan.startPg);
                 if (stopRequested) break;
                 if (r.kind == Result.FAIL && r.expected && r.msg != null && r.msg.contains("전원이 꺼져")
@@ -719,6 +750,7 @@ public class MacroService extends AccessibilityService {
                     waitOffGap(s);
                     Result again = stepOnce(c, MODE_ON, name, rel[0], dev, null);
                     log("켜기 확인: " + again.msg);
+                    if (again.kind == Result.OK) s.onAt = System.currentTimeMillis();
                     if (again.setBits != 0 || again.clearBits != 0) Config.updateStatus(this, dev, again.setBits, again.clearBits);
                     rel[0] = !returnToList(c);
                     for (int w = 0; w < 14 && !stopRequested; w++) sleep(250);   // 켜지는 시간
@@ -726,7 +758,7 @@ public class MacroService extends AccessibilityService {
                 }
                 if (r.unverified && vt < 2) {
                     vt++;
-                    log("시작이 확인되지 않아 " + (vt == 1 ? "목록으로 돌아가 다시 확인" : "앱을 새로 열어 다시 확인"));
+                    log("시작이 확인되지 않음 — 같은 화면에서 다시 누르지 않고 " + (vt == 1 ? "나갔다 들어와서 상태부터 확인" : "앱을 새로 열어 상태부터 확인") + " (이미 작동 중이면 누르지 않음)");
                     rel[0] = vt == 2 || !returnToList(c);
                     continue;
                 }
@@ -1296,6 +1328,15 @@ public class MacroService extends AccessibilityService {
                 seen.add(clabel + (runningNow ? " 작동 중(" + ct[1].trim() + ")" : " 멈춤"));
                 continue;
             }
+            if (target == 2 && !norm(want).contains("음파")) {
+                // 복부(2번)는 '음파 진동' 페이지여야 한다. 화면이 밀려 다른 모드(예: 생리통 LED)에 와 있으면 누르지 않는다.
+                issues++;
+                log("⚠ 2번 페이지가 음파 진동이 아니라 '" + want + "' 이라서 누르지 않음");
+                snapshot("2번 페이지가 음파 진동이 아님");
+                failed.add("2번 페이지가 '" + want + "'(음파 진동 아님) — 누르지 않음");
+                visited.add(want);
+                continue;
+            }
             if (target > 1 && unknown && !startAnyway) {
                 // 상태를 모르면 ▶를 누르지 않는다 (작동 중인 것을 멈추거나, 엉뚱한 것을 시작하지 않기 위해)
                 issues++;
@@ -1391,6 +1432,7 @@ public class MacroService extends AccessibilityService {
                 failed.add(label + " ▶ 누르기 실패");
                 continue;
             }
+            lastPlayAt = System.currentTimeMillis();
             if (verifyStart) {
                 // 수정 사항 적용: 상태 글자가 '마사지 대기'에서 바뀌는지 잠깐 본다 (바뀌면 바로 다음으로)
                 boolean changed = false;

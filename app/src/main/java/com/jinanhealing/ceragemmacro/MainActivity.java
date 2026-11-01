@@ -15,7 +15,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -234,36 +233,18 @@ public class MainActivity extends Activity {
         TextView plan = text(sb.toString().trim(), 14, INK, false);
         plan.setPadding(0, 0, 0, dp(10));
         box.addView(plan);
-        box.addView(text("할 단계를 고르세요", 13, MUTED, true));
-        final CheckBox cOff = stepCheck("끄기  (해제한 부위를 멈추거나 전원 끄기)");
-        final CheckBox cOn = stepCheck("켜기  (꺼진 기기 전원 켜기)");
-        final CheckBox cRun = stepCheck("실행  (새로 고른 부위 작동)");
-        box.addView(cOff);
-        box.addView(cOn);
-        box.addView(cRun);
+        box.addView(text("화면에 보이는 선택대로, 기기마다 필요한 것만 합니다.", 13, MUTED, false));
         new android.app.AlertDialog.Builder(this)
                 .setTitle("수정 사항 적용")
                 .setView(box)
                 .setPositiveButton("적용", (d, w) -> {
-                    MacroService.applyOff = cOff.isChecked();
-                    MacroService.applyOn = cOn.isChecked();
-                    MacroService.applyRun = cRun.isChecked();
-                    if (!(cOff.isChecked() || cOn.isChecked() || cRun.isChecked())) {
-                        Toast.makeText(this, "단계를 하나 이상 골라 주세요", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
+                    MacroService.applyOff = true;     // 단계는 고르지 않는다: 기기마다 필요한 단계만 자동으로
+                    MacroService.applyOn = true;
+                    MacroService.applyRun = true;
                     startMode(MacroService.MODE_APPLY, "");
                 })
                 .setNegativeButton("취소", null)
                 .show();
-    }
-
-    private CheckBox stepCheck(String label) {
-        CheckBox cb = new CheckBox(this);
-        cb.setText(label);
-        cb.setTextSize(15);
-        cb.setChecked(true);
-        return cb;
     }
 
     private void openA11ySettings() {
