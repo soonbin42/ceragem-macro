@@ -84,6 +84,10 @@ public class MacroService extends AccessibilityService {
     private volatile boolean verifyStart = false;
     /** 마지막으로 ▶(시작)를 누른 시각 — 화면이 몇 초 늦게 바뀌는 경우를 위해, 다시 확인하기 전에 이 시각부터 기다린다 */
     private volatile long lastPlayAt = 0;
+    /** 이번 단계에서 '네트워크 연결안됨' 기기를 바로 조치(앱 재실행)하는 기회를 이미 썼는지 — 처음 한 기기만 바로 조치한다 */
+    private volatile boolean netInlineUsed = false;
+    /** 정상 기기를 다 한 뒤 문제 기기를 다시 확인하는 중 (이때는 바로 조치하고, 안 되면 건너뜀) */
+    private volatile boolean netRetryPass = false;
     /** ▶를 접근성 클릭 대신 실제 터치로 누른다 (다시 시도할 때) */
     private volatile boolean tapPress = false;
     /** 방금 전원 켜기를 눌렀으므로 목록의 '전원 꺼짐' 글자를 믿지 않는다 */
@@ -132,6 +136,17 @@ public class MacroService extends AccessibilityService {
             expected = true;
             noRetry = true;
             return this;
+        }
+
+        /** 네트워크 연결안됨 — 지금은 건너뛰고 정상 기기를 다 한 뒤 마지막에 다시 확인할 기기 */
+        boolean deferred = false;
+
+        static Result deferredResult(String m) {
+            Result r = new Result(FAIL, m);
+            r.deferred = true;
+            r.expected = true;
+            r.noRetry = true;
+            return r;
         }
 
         static Result ok(String m) { return new Result(OK, m); }
@@ -265,6 +280,12 @@ public class MacroService extends AccessibilityService {
         final java.util.Map<Integer, Integer> expectedBefore = new java.util.TreeMap<>(c.status);
         final java.util.Map<Integer, Integer> actualNow = new java.util.TreeMap<>();
         final List<Integer> doneDevices = new ArrayList<>();   // 실패하지 않은 기기(기준 선택 갱신용)
+        final List<Integer> poweredOnNow = new ArrayList<>();  // 켜기에서 전원 버튼을 실제로 누른 기기
+        // 처리 순서: 번호 순서. '네트워크 연결안됨' 기기는 맨 뒤로 미뤄 정상 기기를 먼저 한다.
+        final List<Integer> queue = new ArrayList<>(devices);
+        final java.util.Set<Integer> retrying = new java.util.TreeSet<>();
+        netInlineUsed = false;
+        netRetryPass = false;
 
         StringBuilder lines = new StringBuilder();
         int ok = 0, skip = 0, fail = 0;
@@ -289,16 +310,24 @@ public class MacroService extends AccessibilityService {
                 lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                         .append(c.deviceName(dev)).append(" — ").append(r.msg).append('\n');
             }
-        } else for (int k = 0; k < devices.size(); k++) {
+        } else for (int k = 0; k < queue.size(); k++) {
             if (stopRequested) {
                 lines.append("⏹ 사용자가 중지함\n");
                 break;
             }
-            String name = c.deviceName(devices.get(k));
-            toast((k + 1) + "/" + devices.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
-            log("── " + name);
-            final int dev = devices.get(k);
+            String name = c.deviceName(queue.get(k));
+            toast((k + 1) + "/" + queue.size() + "  " + name + "  " + modeLabel(mode) + " 중…");
+            final int dev = queue.get(k);
+            final boolean retryPass = retrying.contains(dev);
+            log("── " + name + (retryPass ? " (네트워크 문제 기기 — 마지막 확인)" : ""));
+            netRetryPass = retryPass;
             Result r = doDevice(c, mode, name, relaunch, dev);
+            if (r.deferred) {
+                queue.add(dev);
+                retrying.add(dev);
+                relaunch = false;    // 방금 목록에서 건너뜀(또는 앱을 새로 열었음) → 목록 화면
+                continue;
+            }
             if (r.kind == Result.FAIL && stopRequested) {
                 log("⏹ 중지 요청으로 멈춤: " + r.msg);
             } else if (r.kind == Result.FAIL && r.expected) {
@@ -312,6 +341,12 @@ public class MacroService extends AccessibilityService {
                 toast(name + " 다시 시도");
                 relaunchReason = name + " 재시도 (" + r.msg + ")";
                 r = doDevice(c, mode, name, true, dev);
+                if (r.deferred) {
+                    queue.add(dev);
+                    retrying.add(dev);
+                    relaunch = false;
+                    continue;
+                }
                 if (r.kind == Result.FAIL) {
                     log("❌ 재시도도 실패: " + r.msg);
                     snapshot(name + " 재시도 실패 직후");
@@ -323,7 +358,7 @@ public class MacroService extends AccessibilityService {
             }
             // 목록으로 빨리 돌아왔으면 다음 기기는 앱을 다시 열지 않는다
             relaunch = stopRequested || !returnToList(c);
-            if (relaunch && !stopRequested && k < devices.size() - 1) {
+            if (relaunch && !stopRequested && k < queue.size() - 1) {
                 issues++;
                 relaunchReason = name + " 뒤 목록으로 돌아오지 못함";
                 log("⚠ 뒤로가기 3번으로도 목록에 못 돌아옴 → 다음 기기에서 세라젬 앱을 새로 엶");
@@ -332,6 +367,7 @@ public class MacroService extends AccessibilityService {
             if (r.kind == Result.OK) ok++;
             else if (r.kind == Result.SKIP) skip++;
             else fail++;
+            if (mode == MODE_ON && r.kind == Result.OK) poweredOnNow.add(dev);
             // 기기 상태 기억 (화면의 켜짐/실행 색)
             if (mode == MODE_CHECK) {
                 if (r.actual >= 0) {
@@ -357,6 +393,7 @@ public class MacroService extends AccessibilityService {
         if (mode == MODE_RUN || mode == MODE_ON_RUN) Config.baselineAdd(this, c, doneDevices, expectedBefore);
         else if (mode == MODE_APPLY) Config.baselineSet(this, c, doneDevices);
         else if (mode == MODE_OFF) Config.baselineSet(this, c, doneDevices);   // 꺼진 뒤에는 지금 선택이 기준
+        else if (mode == MODE_ON) Config.baselineKeepSelected(this, c, poweredOnNow);   // 새로 켠 기기: 해제한 부위는 기준에서 뺌
         if (mode == MODE_CHECK) lines.append(finishCheck(c, expectedBefore, actualNow));
         String summary = "[" + when + "] " + modeTitle(mode) + " (" + sp[Math.max(0, Math.min(2, speed))] + ", " + secs + "초)\n"
                 + "성공 " + ok + " · 건너뜀 " + skip + " · 실패 " + fail + "\n\n"
@@ -395,8 +432,11 @@ public class MacroService extends AccessibilityService {
     /** doDeviceInner 결과에 '이 기기가 켜졌다/꺼졌다'는 상태 변화를 덧붙이고, 수정 사항 적용·속도 변경을 이어 붙인다. */
     private Result doDevice(Config c, int mode, String name, boolean relaunch, int dev) {
         Result r = doDeviceInner(c, mode, name, relaunch, dev);
-        if (mode == MODE_ON && r.kind != Result.FAIL) r.setBits |= Config.ST_POWER;
-        else if (mode == MODE_OFF && r.kind != Result.FAIL) {
+        if (mode == MODE_ON && r.kind != Result.FAIL) {
+            r.setBits |= Config.ST_POWER;
+            // 전원 버튼을 실제로 눌러 켠 기기는 아직 아무것도 안 돌고 있다 (이미 켜져 있어 건너뛴 경우는 그대로 둠)
+            if (r.kind == Result.OK) r.clearBits |= Config.ST_SPINE | Config.ST_ABD;
+        } else if (mode == MODE_OFF && r.kind != Result.FAIL) {
             r.clearBits |= Config.ST_ALL;
             Config.setDevSpeed(this, dev, -1);      // 전원을 끄면 속도도 처음으로
             c.devSpeed.remove(dev);
@@ -525,6 +565,8 @@ public class MacroService extends AccessibilityService {
 
     /** 전원을 켠 뒤 ▶를 누르기까지 기다리는 최소 시간(ms). 시도 순서(0,1,2)마다 늘린다. */
     private static final long[] READY_AFTER_ON_MS = {20000, 30000, 40000};
+    /** 일반 실행(전원 켜기 뒤 바로 ▶): 켠 직후 ▶를 누르면 기기가 켜지다 도로 꺼져서, 켠 지 이만큼은 지난 뒤에 누른다. */
+    private static final long READY_PLAIN_MS = 12000;
 
     /** 방금 켠 기기면, 켠 지 minMs가 지날 때까지 기다린다 (다른 기기를 켜고 오는 동안 지난 시간은 포함). */
     private void waitReadyAfterOn(ApplyState s, long minMs) {
@@ -618,19 +660,29 @@ public class MacroService extends AccessibilityService {
         int[] phases = {MODE_OFF, MODE_ON, MODE_RUN};
         for (int phase : phases) {
             if (stopRequested) break;
-            int total = 0;
-            for (int d : devices) if (phaseNeeds(st.get(d), phase)) total++;
-            int idx = 0;
-            for (int d : devices) {
+            // 단계마다: 번호 순서로 하되 '네트워크 연결안됨' 기기는 맨 뒤로 미룬다 (처음 한 기기만 바로 조치)
+            final List<Integer> queue = new ArrayList<>();
+            for (int d : devices) if (phaseNeeds(st.get(d), phase)) queue.add(d);
+            final java.util.Set<Integer> retrying = new java.util.TreeSet<>();
+            netInlineUsed = false;
+            for (int qi = 0; qi < queue.size(); qi++) {
                 if (stopRequested) break;
+                final int d = queue.get(qi);
                 ApplyState s = st.get(d);
                 if (!phaseNeeds(s, phase)) continue;
-                idx++;
                 String name = c.deviceName(d);
                 String pl = phase == MODE_OFF ? "끄기" : phase == MODE_ON ? "켜기" : "실행";
-                toast(pl + " " + idx + "/" + total + "  " + name);
-                log("── " + name + " · " + pl);
-                applyPhaseStep(c, s, d, name, phase, rel);
+                final boolean retryPass = retrying.contains(d);
+                toast(pl + " " + (qi + 1) + "/" + queue.size() + "  " + name);
+                log("── " + name + " · " + pl + (retryPass ? " (네트워크 문제 기기 — 마지막 확인)" : ""));
+                netRetryPass = retryPass;
+                boolean deferred = applyPhaseStep(c, s, d, name, phase, rel);
+                if (deferred) {
+                    queue.add(d);
+                    retrying.add(d);
+                    rel[0] = false;
+                    continue;
+                }
                 rel[0] = stopRequested || !returnToList(c);
                 if (rel[0] && !stopRequested) {
                     issues++;
@@ -639,6 +691,7 @@ public class MacroService extends AccessibilityService {
                 }
             }
         }
+        netRetryPass = false;
         java.util.Map<Integer, Result> out = new java.util.LinkedHashMap<>();
         for (int d : devices) {
             ApplyState s = st.get(d);
@@ -661,33 +714,37 @@ public class MacroService extends AccessibilityService {
         return out;
     }
 
-    private void applyPhaseStep(Config c, ApplyState s, int dev, String name, int phase, boolean[] rel) {
+    /** 반환: 네트워크 연결안됨이라 지금은 건너뛰고 마지막에 다시 확인해야 하면 true */
+    private boolean applyPhaseStep(Config c, ApplyState s, int dev, String name, int phase, boolean[] rel) {
         int m = phase == MODE_OFF ? (s.plan.steps.contains(MODE_OFF) ? MODE_OFF : MODE_STOP_ABD) : phase;
         String label = m == MODE_OFF ? "끄기" : m == MODE_ON ? "켜기" : m == MODE_RUN ? "실행" : "복부 멈춤";
         Result r = null;
         if (m == MODE_ON) {
             waitOffGap(s);
-            if (stopRequested) return;
+            if (stopRequested) return false;
             r = stepOnce(c, m, name, rel[0], dev, null);
+            if (r.deferred) return true;
             if (r.kind != Result.FAIL) s.onPressed = true;
             if (r.kind == Result.OK) s.onAt = System.currentTimeMillis();   // 실제로 전원을 누른 경우만 (이미 켜져 있으면 기다릴 필요 없음)
         } else if (m == MODE_RUN) {
             r = runStartLadder(c, s, dev, name, rel);
+            if (r.deferred) return true;
         } else {
             // 끄기 / 복부 멈춤: 바뀌는 것을 잠깐 보고, 안 바뀌면 목록으로 갔다가 다시 확인 → 그래도 안 바뀌면 앱을 새로 열어 확인
             for (int a = 0; a < 3 && !stopRequested; a++) {
                 if (a == 1) rel[0] = !returnToList(c);
                 if (a == 2) rel[0] = true;
                 r = stepOnce(c, m, name, rel[0], dev, null);
-                if (!r.unverified) break;
+                if (r.deferred || !r.unverified) break;
                 log("꺼짐이 확인되지 않아 " + (a == 0 ? "목록으로 돌아가 다시 확인" : "앱을 새로 열어 다시 확인"));
             }
+            if (r != null && r.deferred) return true;
             if (r != null && r.unverified) {
                 r = Result.fail("전원 버튼을 눌렀지만 꺼짐이 확인되지 않음");
                 r.noRetry();
             }
         }
-        if (r == null) return;
+        if (r == null) return false;
         if (r.setBits != 0 || r.clearBits != 0) Config.updateStatus(this, dev, r.setBits, r.clearBits);
         if (s.msg.length() > 0) s.msg.append(" → ");
         s.msg.append(label).append(": ").append(r.msg);
@@ -705,6 +762,7 @@ public class MacroService extends AccessibilityService {
             if (r.kind == Result.OK) s.anyOk = true;
             s.doneSteps++;
         }
+        return false;
     }
 
     /** 끈 지 10초가 안 지났으면 기다린다 (끈 직후에 켜기를 누르면 먹지 않음). */
@@ -725,8 +783,8 @@ public class MacroService extends AccessibilityService {
                 // 방금 켠 기기: 켠 직후에는 ▶가 보여도 먹지 않았다 → 켠 지 일정 시간이 지난 뒤에 누른다 (시도할수록 더 길게)
                 // 이 꼼꼼한 확인은 '척추+복부 → 복부만' 바꾸는 기기에만 한다. 다른 실행은 예전처럼 한 번 누르고 넘어간다.
                 final boolean careful = s.plan.convert;
+                waitReadyAfterOn(s, careful ? READY_AFTER_ON_MS[Math.min(vt, READY_AFTER_ON_MS.length - 1)] : READY_PLAIN_MS);
                 if (careful) {
-                    waitReadyAfterOn(s, READY_AFTER_ON_MS[Math.min(vt, READY_AFTER_ON_MS.length - 1)]);
                     if (vt > 0) {
                         // 같은 화면에서 다시 누르면 시작됐던 것이 멈춘다. 화면은 몇 초 늦게 바뀌므로 그만큼 기다린 뒤, 눌러 보지 않고 상태부터 본다.
                         long left = lastPlayAt + 8000 - System.currentTimeMillis();
@@ -739,7 +797,15 @@ public class MacroService extends AccessibilityService {
                 afterPowerOn = s.onPressed;
                 if (s.onAt > 0) log("▶ 시도 " + (vt + 1) + "번째 — 전원 켠 지 " + ((System.currentTimeMillis() - s.onAt) / 1000) + "초");
                 r = stepOnce(c, MODE_RUN, name, rel[0], dev, s.plan.startPg);
-                if (stopRequested) break;
+                if (stopRequested || r.deferred) break;
+                if (r.kind != Result.FAIL && s.onPressed) {
+                    // 방금 켠 기기: ▶를 누른 직후 도로 꺼지는 경우가 있어, 잠깐 뒤 화면이 '전원을 켜 주세요'로 돌아갔는지 한 번 더 본다
+                    sleep(1500);
+                    if (visibleText("전원을 켜 주세요") != null || visibleText("전원을 켜주세요") != null) {
+                        log("⚠ ▶ 누른 직후 기기가 도로 꺼짐");
+                        r = Result.fail("전원이 꺼져 있음 — 실행 직후 꺼짐").expected();
+                    }
+                }
                 if (r.kind == Result.FAIL && r.expected && r.msg != null && r.msg.contains("전원이 꺼져")
                         && s.onPressed && onTry < 3) {
                     onTry++;
@@ -748,13 +814,14 @@ public class MacroService extends AccessibilityService {
                     verifyStart = false;
                     rel[0] = !returnToList(c);
                     waitOffGap(s);
+                    // 바로 다시 누르지 않고 조금 기다렸다가 켠다 (켜지는 중에 또 누르면 꺼질 수 있음)
+                    for (int w = 0; w < 16 && !stopRequested; w++) sleep(250);
                     Result again = stepOnce(c, MODE_ON, name, rel[0], dev, null);
                     log("켜기 확인: " + again.msg);
                     if (again.kind == Result.OK) s.onAt = System.currentTimeMillis();
                     if (again.setBits != 0 || again.clearBits != 0) Config.updateStatus(this, dev, again.setBits, again.clearBits);
                     rel[0] = !returnToList(c);
-                    for (int w = 0; w < 14 && !stopRequested; w++) sleep(250);   // 켜지는 시간
-                    continue;
+                    continue;   // 켜지는 시간은 다음 시도 앞의 '켠 뒤 기다림'에서 기다린다
                 }
                 if (r.unverified && vt < 2) {
                     vt++;
@@ -783,9 +850,18 @@ public class MacroService extends AccessibilityService {
         log("목록 카드: " + clean(status));
         if (isNetDown(status)) {
             // 목록에 '네트워크 연결안됨' — 이 상태에서 기기 화면을 열면 엉뚱한 버튼을 누르게 된다.
+            if (!netRetryPass && netInlineUsed) {
+                // 이미 한 기기를 조치해 봤으면, 이 기기는 건드리지 않고 정상 기기를 먼저 한다
+                log("⚠ 네트워크 연결안됨 — 정상 기기를 먼저 하고 마지막에 다시 확인");
+                return Result.deferredResult("네트워크 연결안됨 — 마지막에 다시 확인");
+            }
+            if (!netRetryPass) netInlineUsed = true;
             AccessibilityNodeInfo up = recoverNetDown(c, name);
             if (stopRequested) return Result.fail("중지됨");
-            if (up == null) return Result.fail("네트워크 연결안됨 — 한 번 다시 열어 봤지만 연결 안 돼서 건너뜀 (나중에 직접 확인)").expected();
+            if (up == null) {
+                if (!netRetryPass) return Result.deferredResult("네트워크 연결안됨 — 마지막에 다시 확인");
+                return Result.fail("네트워크 연결안됨 — 마지막에 다시 열어 봤지만 연결 안 돼서 건너뜀 (직접 확인)").expected();
+            }
             card = up;
             status = collectText(card);
             log("목록 카드: " + clean(status));
@@ -1789,7 +1865,8 @@ public class MacroService extends AccessibilityService {
      */
     private AccessibilityNodeInfo recoverNetDown(Config c, String name) {
         issues++;
-        log("⚠ 목록에 '네트워크 연결안됨' — 세라젬 앱을 한 번 다시 엶 (안 되면 이 기기는 건너뜀)");
+        log("⚠ 목록에 '네트워크 연결안됨' — 세라젬 앱을 한 번 다시 엶 ("
+                + (netRetryPass ? "안 되면 이 기기는 건너뜀)" : "안 되면 정상 기기를 먼저 하고 마지막에 다시 확인)"));
         relaunchReason = name + " 네트워크 연결안됨";
         if (!stopRequested && launchTarget()) {
             AccessibilityNodeInfo fresh = findCard(c, name, true);

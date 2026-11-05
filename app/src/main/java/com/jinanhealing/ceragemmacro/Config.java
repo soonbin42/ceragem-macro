@@ -133,6 +133,10 @@ public class Config {
     /** 마지막 실행·적용 이후 선택이 바뀐 기기인지. */
     public boolean modified(int dev) {
         boolean sp = selSpine.contains(dev), ab = selAbd.contains(dev);
+        // 전원이 켜져 있다고 알면 '실제로 돌고 있다고 아는 부위'(실행·점검으로 기억한 상태)와 비교한다.
+        // 켜기만 했거나 선택을 해제했다가 다시 고른 기기는 돌고 있지 않으므로 수정으로 본다.
+        int st = statusOf(dev);
+        if ((st & ST_POWER) != 0) return sp != ((st & ST_SPINE) != 0) || ab != ((st & ST_ABD) != 0);
         // 선택이 없고 전원도 꺼져 있다고 알고 있으면 할 일이 없다 (옛 기준이 남아 있어도 수정으로 보지 않음)
         if (!sp && !ab && (statusOf(dev) & ST_POWER) == 0) return false;
         return sp != baseSpine.contains(dev) || ab != baseAbd.contains(dev);
@@ -140,11 +144,13 @@ public class Config {
 
     /** 실제로 돌고 있다고 볼 수 있는 기준: 전원이 꺼져 있다고 알면 아무것도 돌지 않는 것. */
     public boolean effBaseSpine(int dev) {
-        return (statusOf(dev) & ST_POWER) != 0 && baseSpine.contains(dev);
+        int st = statusOf(dev);
+        return (st & ST_POWER) != 0 && (st & ST_SPINE) != 0;
     }
 
     public boolean effBaseAbd(int dev) {
-        return (statusOf(dev) & ST_POWER) != 0 && baseAbd.contains(dev);
+        int st = statusOf(dev);
+        return (st & ST_POWER) != 0 && (st & ST_ABD) != 0;
     }
 
     public int modifiedCount() {
@@ -242,9 +248,13 @@ public class Config {
         for (int d : devs) {
             Integer b0 = before == null ? null : before.get(d);
             boolean wasOn = b0 != null && (b0 & ST_POWER) != 0;
-            if (!wasOn) {
-                bs.remove(d);
-                ba.remove(d);
+            // 실행 전에 실제로 돌고 있던 부위(상태 기억)만 기준으로 삼는다.
+            // 옛 '기준 선택'이 남아 있어도(예: 끄기 때 저장된 선택) 방금 켠 기기는 아무것도 안 돌던 것이다.
+            bs.remove(d);
+            ba.remove(d);
+            if (wasOn) {
+                if ((b0 & ST_SPINE) != 0) bs.add(d);
+                if ((b0 & ST_ABD) != 0) ba.add(d);
             }
             if (sel.selSpine.contains(d)) bs.add(d);
             if (sel.selAbd.contains(d)) ba.add(d);
@@ -278,6 +288,18 @@ public class Config {
             else bs.remove(d);
             if ((a & ST_ABD) != 0) ba.add(d);
             else ba.remove(d);
+        }
+        p.edit().putString("baseSpine", joinSet(bs)).putString("baseAbd", joinSet(ba)).apply();
+    }
+
+    /** 전원을 새로 켠 기기: 해제해 둔 부위는 돌 수 없으므로 기준에서 뺀다 (고른 부위는 그대로 둠 — 켜기만으로 '수정됨'이 생기지 않게). */
+    public static synchronized void baselineKeepSelected(Context ctx, Config sel, Collection<Integer> devs) {
+        SharedPreferences p = prefs(ctx);
+        Set<Integer> bs = parseSet(p.getString("baseSpine", joinSet(sel.baseSpine)), 99);
+        Set<Integer> ba = parseSet(p.getString("baseAbd", joinSet(sel.baseAbd)), 99);
+        for (int d : devs) {
+            if (!sel.selSpine.contains(d)) bs.remove(d);
+            if (!sel.selAbd.contains(d)) ba.remove(d);
         }
         p.edit().putString("baseSpine", joinSet(bs)).putString("baseAbd", joinSet(ba)).apply();
     }
