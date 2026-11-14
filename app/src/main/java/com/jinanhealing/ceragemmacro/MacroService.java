@@ -284,6 +284,10 @@ public class MacroService extends AccessibilityService {
         // 처리 순서: 번호 순서. '네트워크 연결안됨' 기기는 맨 뒤로 미뤄 정상 기기를 먼저 한다.
         final List<Integer> queue = new ArrayList<>(devices);
         final java.util.Set<Integer> retrying = new java.util.TreeSet<>();
+        // 실행인데 꺼져 있던 기기: 먼저 켜 두고(켜지는 것은 기다리지 않음) 실행은 다른 기기를 한 뒤로 미룬다
+        final java.util.Map<Integer, ApplyState> pendingRun = new java.util.LinkedHashMap<>();
+        final java.util.Set<Integer> powerOnTried = new java.util.TreeSet<>();
+        final Result[] ponOut = new Result[1];
         netInlineUsed = false;
         netRetryPass = false;
 
@@ -321,8 +325,28 @@ public class MacroService extends AccessibilityService {
             final boolean retryPass = retrying.contains(dev);
             log("── " + name + (retryPass ? " (네트워크 문제 기기 — 마지막 확인)" : ""));
             netRetryPass = retryPass;
-            Result r = doDevice(c, mode, name, relaunch, dev);
-            if (r.deferred) {
+            final ApplyState pend = pendingRun.remove(dev);
+            Result r;
+            if (pend != null) {
+                // 앞서 켜 둔 기기: 켠 지 일정 시간이 지난 뒤에 실행한다 (켠 직후 ▶는 먹지 않고 기기가 도로 꺼짐)
+                netRetryPass = true;     // 네트워크 문제가 또 나와도 더 미루지 않고 한 번만 확인
+                log("앞서 켜 둔 기기 — 이제 실행");
+                boolean[] relp = {relaunch};
+                r = runStartLadder(c, pend, dev, name, relp);
+                relaunch = relp[0];
+                if (!r.deferred) r = prefixed(r, "전원 켬 → ");
+            } else {
+                r = doDevice(c, mode, name, relaunch, dev);
+            }
+            int po = pend == null ? powerOnForRun(c, mode, r, name, dev, pendingRun, powerOnTried, ponOut) : 0;
+            if (po == 3) r = ponOut[0];
+            if (po == 2) {
+                // 켰다 → 실행은 뒤로 (네트워크 문제 기기보다는 앞)
+                insertPending(queue, retrying, k, dev);
+                relaunch = stopRequested || !returnToList(c);
+                continue;
+            }
+            if (po == 1 || r.deferred) {
                 queue.add(dev);
                 retrying.add(dev);
                 relaunch = false;    // 방금 목록에서 건너뜀(또는 앱을 새로 열었음) → 목록 화면
@@ -341,7 +365,14 @@ public class MacroService extends AccessibilityService {
                 toast(name + " 다시 시도");
                 relaunchReason = name + " 재시도 (" + r.msg + ")";
                 r = doDevice(c, mode, name, true, dev);
-                if (r.deferred) {
+                int po2 = pend == null ? powerOnForRun(c, mode, r, name, dev, pendingRun, powerOnTried, ponOut) : 0;
+                if (po2 == 3) r = ponOut[0];
+                if (po2 == 2) {
+                    insertPending(queue, retrying, k, dev);
+                    relaunch = stopRequested || !returnToList(c);
+                    continue;
+                }
+                if (po2 == 1 || r.deferred) {
                     queue.add(dev);
                     retrying.add(dev);
                     relaunch = false;
@@ -381,6 +412,11 @@ public class MacroService extends AccessibilityService {
             lines.append(r.kind == Result.OK ? "✅ " : r.kind == Result.SKIP ? "➖ " : "❌ ")
                     .append(name).append(" — ").append(r.msg).append('\n');
         }
+        // 켜기만 하고 중지돼서 실행하지 못한 기기
+        for (int d : pendingRun.keySet()) {
+            lines.append("❌ ").append(c.deviceName(d)).append(" — 전원은 켰지만 실행하지 못함 (중지)\n");
+            fail++;
+        }
         // 골라 둔 속도는 '모드 변경'을 누른 뒤 한 번의 실행·적용에만 쓴다
         if ((mode == MODE_RUN || mode == MODE_APPLY) && c.speedPending && !stopRequested) {
             Config.setSpeedPending(this, false);
@@ -408,6 +444,70 @@ public class MacroService extends AccessibilityService {
                     + " — 아래 '진행 기록 공유'로 보내주세요";
         }
         return summary;
+    }
+
+    /**
+     * 실행인데 기기가 꺼져 있으면 먼저 전원을 켜고(켜지는 것은 기다리지 않음) 실행은 뒤로 미룬다.
+     * 반환: 0 = 해당 없음 · 1 = 네트워크 문제로 마지막에 다시 · 2 = 켰음(실행은 pendingRun에 담음) · 3 = 켜기 실패(out[0]에 결과)
+     */
+    private int powerOnForRun(Config c, int mode, Result r, String name, int dev,
+                              java.util.Map<Integer, ApplyState> pendingRun, java.util.Set<Integer> tried, Result[] out) {
+        if (mode != MODE_RUN || stopRequested || r.deferred || r.kind != Result.FAIL || !r.expected
+                || r.msg == null || !r.msg.startsWith("전원이 꺼져 있음 — 먼저 켜기")) return 0;
+        if (!tried.add(dev)) return 0;     // 이미 한 번 켜 봤으면 더 켜지 않는다
+        log("전원이 꺼져 있음 → 먼저 켜 두고, 켜지는 동안 다른 기기를 실행한 뒤 이 기기를 실행함");
+        boolean relOn = !returnToList(c);
+        Result on = stepOnce(c, MODE_ON, name, relOn, dev, null);
+        if (!on.deferred && on.kind == Result.FAIL && !on.noRetry && !stopRequested) {
+            log("켜기 실패 — 한 번 더: " + on.msg);
+            on = stepOnce(c, MODE_ON, name, true, dev, null);
+        }
+        if (on.deferred) {
+            tried.remove(dev);              // 마지막 확인 때 다시 켜 본다
+            return 1;
+        }
+        log("켜기: " + on.msg);
+        if (on.setBits != 0 || on.clearBits != 0) Config.updateStatus(this, dev, on.setBits, on.clearBits);
+        if (on.kind == Result.FAIL) {
+            Result f = Result.fail("전원이 꺼져 있어 켜려 했지만 실패: " + on.msg);
+            f.noRetry();
+            f.expected = on.expected;
+            out[0] = f;
+            return 3;
+        }
+        ApplyState ps = new ApplyState();
+        ps.plan = new ApplyPlan();
+        ps.plan.startPg.addAll(c.pagesFor(dev));
+        ps.onPressed = true;
+        if (on.kind == Result.OK) ps.onAt = System.currentTimeMillis();   // 실제로 전원을 누른 경우만
+        pendingRun.put(dev, ps);
+        return 2;
+    }
+
+    /** 켜 둔 기기의 실행을 큐 뒤쪽에 넣는다 (네트워크 문제로 미뤄진 기기보다는 앞). */
+    private static void insertPending(List<Integer> queue, java.util.Set<Integer> retrying, int k, int dev) {
+        int ins = queue.size();
+        for (int j = k + 1; j < queue.size(); j++) {
+            if (retrying.contains(queue.get(j))) {
+                ins = j;
+                break;
+            }
+        }
+        queue.add(ins, dev);
+    }
+
+    /** 결과 글자 앞에 말을 붙인 복사본 (상태 비트·플래그는 그대로). */
+    private static Result prefixed(Result r, String pre) {
+        Result n = new Result(r.kind, pre + r.msg);
+        n.noRetry = r.noRetry;
+        n.setBits = r.setBits;
+        n.clearBits = r.clearBits;
+        n.actual = r.actual;
+        n.keepModified = r.keepModified;
+        n.unverified = r.unverified;
+        n.expected = r.expected;
+        n.deferred = r.deferred;
+        return n;
     }
 
     /** 모드마다 대상이 되는 기기: 켜기·끄기·실행 = 척추나 복부가 선택된 기기, 모드 변경 = 척추 선택, 적용 = 선택이 바뀐 기기, 점검 = 전부 */

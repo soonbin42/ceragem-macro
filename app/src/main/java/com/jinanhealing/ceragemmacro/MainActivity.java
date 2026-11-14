@@ -260,18 +260,27 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
+    /** 화면이 짧은 폰(예: A25 + 화면 확대)이면 여백·높이를 줄여서 시간 카드까지 한 화면에 보이게 한다. */
+    private boolean compact = false;
+
     private void buildUi() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        compact = dm.heightPixels / dm.density < 920;
+
         scroll = new ScrollView(this);
         scroll.setBackgroundColor(Color.parseColor("#FAF7F5"));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(24), dp(16), dp(32));
+        root.setPadding(dp(16), dp(compact ? 12 : 24), dp(16), dp(compact ? 16 : 32));
         scroll.addView(root);
 
-        TextView title = text("세라젬 일괄조작", 24, INK, true);
+        TextView title = text("세라젬 일괄조작", compact ? 20 : 24, INK, true);
         root.addView(title);
-        TextView sub = text("선택한 칸만 세라젬 IoT 앱에서 차례로 대신 눌러 줍니다. 실행 중에는 폰을 만지지 마세요. 볼륨 아래 버튼을 두 번 누르면 멈춥니다.", 13, MUTED, false);
-        sub.setPadding(0, dp(4), 0, dp(12));
+        TextView sub = text(compact
+                ? "볼륨 아래 버튼을 두 번 누르면 멈춥니다."
+                : "선택한 칸만 세라젬 IoT 앱에서 차례로 대신 눌러 줍니다. 실행 중에는 폰을 만지지 마세요. 볼륨 아래 버튼을 두 번 누르면 멈춥니다.",
+                compact ? 12 : 13, MUTED, false);
+        sub.setPadding(0, dp(compact ? 2 : 4), 0, dp(compact ? 8 : 12));
         root.addView(sub);
 
         // 끄기 · 켜기 · 실행
@@ -294,7 +303,7 @@ public class MainActivity extends Activity {
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(4), dp(14), 0, dp(6));
+        head.setPadding(dp(4), dp(compact ? 8 : 14), 0, dp(compact ? 4 : 6));
         head.addView(text("대상 기기", 15, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         head.addView(legend(NUM_OFF, "꺼짐", false));
         head.addView(legend(NUM_ON, "켜짐", false));
@@ -335,8 +344,8 @@ public class MainActivity extends Activity {
         cbg.setCornerRadius(dp(16));
         cbg.setStroke(dp(2), INK);
         checkButton.setBackground(cbg);
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(66), 1f);
-        clp.setMargins(dp(4), dp(10), dp(4), 0);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(compact ? 58 : 66), 1f);
+        clp.setMargins(dp(4), dp(compact ? 8 : 10), dp(4), 0);
         checkButton.setLayoutParams(clp);
         checkButton.setOnClickListener(v -> startMode(MacroService.MODE_CHECK, ""));
         row3.addView(checkButton);
@@ -347,8 +356,8 @@ public class MainActivity extends Activity {
         applyButton.setTextColor(Color.WHITE);
         applyButton.setPadding(0, 0, 0, 0);
         applyButton.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, dp(66), 1f);
-        alp.setMargins(dp(4), dp(10), dp(4), 0);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(0, dp(compact ? 58 : 66), 1f);
+        alp.setMargins(dp(4), dp(compact ? 8 : 10), dp(4), 0);
         applyButton.setLayoutParams(alp);
         applyButton.setOnClickListener(v -> showApplyDialog());
         row3.addView(applyButton);
@@ -356,13 +365,14 @@ public class MainActivity extends Activity {
 
         // 실행 후 경과 시간 (버튼 한 줄 아래)
         LinearLayout timeCard = card(root);
-        ((LinearLayout.LayoutParams) timeCard.getLayoutParams()).topMargin = dp(12);
+        ((LinearLayout.LayoutParams) timeCard.getLayoutParams()).topMargin = dp(compact ? 8 : 12);
+        if (compact) timeCard.setPadding(dp(14), dp(8), dp(14), dp(8));
         timeCard.setOrientation(LinearLayout.HORIZONTAL);
         timeCard.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout tl = new LinearLayout(this);
         tl.setOrientation(LinearLayout.VERTICAL);
         tl.addView(text("실행 후 경과", 12, MUTED, true));
-        elapsedView = text("00:00", 32, INK, true);
+        elapsedView = text("00:00", compact ? 26 : 32, INK, true);
         tl.addView(elapsedView);
         timeCard.addView(tl, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         LinearLayout tr = new LinearLayout(this);
@@ -383,6 +393,21 @@ public class MainActivity extends Activity {
         countsView.setPadding(0, dp(4), 0, 0);
         tr.addView(countsView);
         timeCard.addView(tr);
+        if (compact) {
+            // 짧은 화면: 시간 카드 아래(마지막 줄·최근 결과…)는 첫 화면 밖으로 밀어낸다 (스크롤하면 보임)
+            final View pushDown = new View(this);
+            root.addView(pushDown, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+            final LinearLayout tc = timeCard;
+            scroll.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                int h = scroll.getHeight() - tc.getBottom() - dp(8) + dp(4);
+                if (h < 0) h = 0;
+                ViewGroup.LayoutParams plp = pushDown.getLayoutParams();
+                if (plp.height != h) {
+                    plp.height = h;
+                    pushDown.setLayoutParams(plp);
+                }
+            });
+        }
         lastLineView = text("", 12, MUTED, false);
         lastLineView.setPadding(dp(6), 0, 0, 0);
         root.addView(lastLineView);
@@ -685,8 +710,8 @@ public class MainActivity extends Activity {
         b.left = left;
         b.ring = new LinearLayout(this);
         b.ring.setPadding(dp(3), dp(3), dp(3), dp(3));
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(66));
-        rlp.bottomMargin = dp(5);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(compact ? 56 : 66));
+        rlp.bottomMargin = dp(compact ? 4 : 5);
         b.ring.setLayoutParams(rlp);
 
         b.row = new LinearLayout(this);
@@ -911,7 +936,7 @@ public class MainActivity extends Activity {
 
     private TextView section(String s) {
         TextView t = text(s, 15, MUTED, true);
-        t.setPadding(dp(4), dp(18), 0, dp(6));
+        t.setPadding(dp(4), dp(compact ? 10 : 18), 0, dp(6));
         return t;
     }
 
@@ -945,7 +970,7 @@ public class MainActivity extends Activity {
         bg.setColor(color);
         bg.setCornerRadius(dp(18));
         b.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(84), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(compact ? 70 : 84), 1f);
         lp.setMargins(dp(4), dp(4), dp(4), dp(4));
         b.setLayoutParams(lp);
         b.setOnClickListener(l);
@@ -963,7 +988,7 @@ public class MainActivity extends Activity {
         bg.setColor(Color.parseColor("#EAE3DF"));
         bg.setCornerRadius(dp(16));
         b.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(compact ? 48 : 56), 1f);
         lp.setMargins(dp(4), dp(4), dp(4), dp(4));
         b.setLayoutParams(lp);
         b.setOnClickListener(l);
@@ -976,7 +1001,7 @@ public class MainActivity extends Activity {
         modeChangeBox = box;
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(compact ? 48 : 56), 1f);
         lp.setMargins(dp(4), dp(4), dp(4), dp(4));
         box.setLayoutParams(lp);
         box.setClickable(true);
