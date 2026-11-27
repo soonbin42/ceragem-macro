@@ -50,6 +50,15 @@ public class MacroService extends AccessibilityService {
     public static final int MODE_CHECK = 9;
     /** (내부) 복부(2번 페이지)만 멈춤 — 수정 사항 적용의 한 단계 */
     public static final int MODE_STOP_ABD = 10;
+    /** 온열(온도 창): 끄기=전부 0 · 기본=44·44·44·37 · 높게=전부 50 · 복부만 높게=맨 아래 칸만 50. 점검은 온도 창을 열지 않는다. */
+    public static final int MODE_HEAT_OFF = 11;
+    public static final int MODE_HEAT_BASE = 12;
+    public static final int MODE_HEAT_HIGH = 13;
+    public static final int MODE_HEAT_ABD = 14;
+
+    public static boolean isHeatMode(int mode) {
+        return mode >= MODE_HEAT_OFF && mode <= MODE_HEAT_ABD;
+    }
     /** 수정 사항 적용에서 할 단계(끄기 / 켜기 / 실행). 앱 화면에서 고른 값. */
     public static volatile boolean applyOff = true, applyOn = true, applyRun = true;
     private static final String[] SPEED_LABELS = {"저속", "정속", "고속"};
@@ -217,6 +226,10 @@ public class MacroService extends AccessibilityService {
             case MODE_APPLY: return "수정 사항 적용";
             case MODE_CHECK: return "점검";
             case MODE_STOP_ABD: return "복부 멈춤";
+            case MODE_HEAT_OFF: return "온열 끄기";
+            case MODE_HEAT_BASE: return "온열 기본";
+            case MODE_HEAT_HIGH: return "온열 높게";
+            case MODE_HEAT_ABD: return "복부만 높게";
             default: return "?";
         }
     }
@@ -274,7 +287,7 @@ public class MacroService extends AccessibilityService {
         List<Integer> devices = devicesFor(c, mode);
         if (devices.isEmpty()) return mode == MODE_APPLY ? "수정한 기기가 없어요." : "선택된 기기가 없어요.";
         // 점검 다음 동작을 시작하면 '달랐던 곳' 표시는 지운다
-        if (mode != MODE_CHECK && !c.diffDevs.isEmpty()) Config.setDiffDevs(this, new ArrayList<Integer>());
+        if (mode != MODE_CHECK && !isHeatMode(mode) && !c.diffDevs.isEmpty()) Config.setDiffDevs(this, new ArrayList<Integer>());
         long t0 = System.currentTimeMillis();
         // 점검: 점검 전에 일괄조작이 알고 있던 상태 / 점검으로 알게 된 실제 상태
         final java.util.Map<Integer, Integer> expectedBefore = new java.util.TreeMap<>(c.status);
@@ -526,7 +539,7 @@ public class MacroService extends AccessibilityService {
     }
 
     private static String modeTitle(int mode) {
-        return (mode == MODE_APPLY || mode == MODE_CHECK ? "" : "전체 ") + modeLabel(mode);
+        return (mode == MODE_APPLY || mode == MODE_CHECK || isHeatMode(mode) ? "" : "전체 ") + modeLabel(mode);
     }
 
     /** doDeviceInner 결과에 '이 기기가 켜졌다/꺼졌다'는 상태 변화를 덧붙이고, 수정 사항 적용·속도 변경을 이어 붙인다. */
@@ -1121,6 +1134,7 @@ public class MacroService extends AccessibilityService {
         if (mode == MODE_CHANGE || mode == MODE_CHANGE_FAST || mode == MODE_CHANGE_SLOW) return changeSpineMode(c);
         if (mode == MODE_CHECK) return checkDevice(c);
         if (mode == MODE_STOP_ABD) return stopAbdomen(c);
+        if (isHeatMode(mode)) return setHeat(c, mode);
         return runWithSpeed(c, dev);
     }
 
@@ -1254,6 +1268,350 @@ public class MacroService extends AccessibilityService {
         log("모드를 골랐지만 모드 번호가 " + no + "로 바뀐 것을 확인하지 못함");
         snapshot("모드 변경 확인 실패");
         return Result.skip(shortName + " 선택함 — 변경 확인 안 됨");
+    }
+
+    // ---------------------------------------------------------------- 온열 (온도 창)
+    // 점검은 이 창을 열지 않는다. 온열 버튼(끄기·기본·높게·복부만 높게)을 눌렀을 때만 연다.
+
+    private static final String ID_TEMP_BTN = "kr.co.ceragem.iot:id/open_body_parts_temperatures";
+    private static final String ID_TEMP_LIST = "kr.co.ceragem.iot:id/master_v_temperatures";
+    private static final String ID_TEMP_BATCH = "kr.co.ceragem.iot:id/do_batch_temperature";
+    private static final String ID_TEMP_MAX = "kr.co.ceragem.iot:id/do_max_temperature";
+    private static final String ID_TEMP_DEC = "kr.co.ceragem.iot:id/do_decrease";
+    private static final String ID_TEMP_INC = "kr.co.ceragem.iot:id/do_increase";
+    private static final String ID_TEMP_TEXT = "kr.co.ceragem.iot:id/dialog_widget_05";
+
+    /** 모드별 목표 온도(위→아래 4칸). -1 = 그 칸은 건드리지 않음. */
+    private static int[] heatTargets(int mode) {
+        switch (mode) {
+            case MODE_HEAT_OFF: return new int[]{0, 0, 0, 0};
+            case MODE_HEAT_BASE: return new int[]{44, 44, 44, 37};
+            case MODE_HEAT_HIGH: return new int[]{50, 50, 50, 50};
+            default: return new int[]{-1, -1, -1, 50};      // 복부만 높게
+        }
+    }
+
+    /** 0·50은 '일괄 온도 설정'을 켜고 한 칸만 맞추면 전부 따라온다. 기본·복부만은 칸마다 따로. */
+    private static boolean heatUsesBatch(int mode) {
+        return mode == MODE_HEAT_OFF || mode == MODE_HEAT_HIGH;
+    }
+
+    private static String heatStr(int[] v) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < v.length; i++) {
+            if (i > 0) sb.append('·');
+            sb.append(v[i] < 0 ? "?" : String.valueOf(v[i]));
+        }
+        return sb.toString();
+    }
+
+    /** 온도 창의 칸들(위→아래). 줄이기/늘리기 버튼이 보이는 줄만. */
+    private List<AccessibilityNodeInfo> heatRows() {
+        List<AccessibilityNodeInfo> rows = new ArrayList<>();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return rows;
+        List<AccessibilityNodeInfo> lists = root.findAccessibilityNodeInfosByViewId(ID_TEMP_LIST);
+        if (lists == null || lists.isEmpty()) return rows;
+        AccessibilityNodeInfo list = lists.get(0);
+        for (int i = 0; i < list.getChildCount(); i++) {
+            AccessibilityNodeInfo ch = list.getChild(i);
+            if (ch == null) continue;
+            List<AccessibilityNodeInfo> inc = ch.findAccessibilityNodeInfosByViewId(ID_TEMP_INC);
+            if (inc == null || inc.isEmpty() || !inc.get(0).isVisibleToUser()) continue;
+            rows.add(ch);
+        }
+        java.util.Collections.sort(rows, (a, b) -> {
+            Rect ra = new Rect(), rb = new Rect();
+            a.getBoundsInScreen(ra);
+            b.getBoundsInScreen(rb);
+            return Integer.compare(ra.top, rb.top);
+        });
+        return rows;
+    }
+
+    /** "OFF"·"꺼짐"이면 0, 숫자면 그 값, 읽을 수 없으면 -1. */
+    private static int heatToken(String raw) {
+        if (raw == null) return -1;
+        String t = raw.replace("℃", "").replace("°", "").trim();
+        if (t.isEmpty()) return -1;
+        String up = t.toUpperCase(Locale.ROOT);
+        if (up.contains("OFF") || t.contains("꺼")) return 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("-?\\d+").matcher(t);
+        return m.find() ? Integer.parseInt(m.group()) : -1;
+    }
+
+    /** 한 칸의 설정 온도. "44 / 44 ℃"에서 슬래시 뒤 값(설정), 없으면 슬라이더 설명 "Value, 44", 그것도 없으면 슬라이더 값. */
+    private int heatValue(AccessibilityNodeInfo row) {
+        int fromDesc = -1, fromRange = -1;
+        for (AccessibilityNodeInfo n : allNodes(row)) {
+            if (ID_TEMP_TEXT.equals(n.getViewIdResourceName()) && n.getText() != null) {
+                String tx = n.getText().toString();
+                int sl = tx.indexOf('/');
+                int v = heatToken(sl >= 0 ? tx.substring(sl + 1) : tx);
+                if (v >= 0) return v;
+            }
+            CharSequence d = n.getContentDescription();
+            if (d != null && fromDesc < 0) {
+                String s = d.toString();
+                if (s.toLowerCase(Locale.ROOT).startsWith("value")) {
+                    int comma = s.indexOf(',');
+                    fromDesc = heatToken(comma >= 0 ? s.substring(comma + 1) : s.substring(5));
+                }
+            }
+            if (fromRange < 0 && n.getRangeInfo() != null) {
+                fromRange = (int) Math.round(n.getRangeInfo().getCurrent());
+            }
+        }
+        return fromDesc >= 0 ? fromDesc : fromRange;
+    }
+
+    private int[] heatReadAll() {
+        List<AccessibilityNodeInfo> rows = heatRows();
+        int[] v = new int[rows.size()];
+        for (int i = 0; i < v.length; i++) v[i] = heatValue(rows.get(i));
+        return v;
+    }
+
+    private int heatAt(int idx) {
+        List<AccessibilityNodeInfo> rows = heatRows();
+        return idx < rows.size() ? heatValue(rows.get(idx)) : -1;
+    }
+
+    /** 값이 before에서 바뀔 때까지 최대 ms 기다린다. 마지막으로 읽은 값. */
+    private int heatWaitChange(int idx, int before, long ms) {
+        long end = System.currentTimeMillis() + ms;
+        int v = heatAt(idx);
+        while (v == before && System.currentTimeMillis() < end && !stopRequested) {
+            sleep(speed >= 2 ? 100 : 200);
+            v = heatAt(idx);
+        }
+        return v;
+    }
+
+    /** 줄이기/늘리기 버튼 한 번. 버튼이 없거나 눌리지 않는 상태(한계)면 false. */
+    private boolean heatPress(int idx, boolean up) {
+        List<AccessibilityNodeInfo> rows = heatRows();
+        if (idx >= rows.size()) return false;
+        List<AccessibilityNodeInfo> bs = rows.get(idx).findAccessibilityNodeInfosByViewId(up ? ID_TEMP_INC : ID_TEMP_DEC);
+        if (bs == null || bs.isEmpty()) return false;
+        AccessibilityNodeInfo b = bs.get(0);
+        if (!b.isEnabled()) return false;
+        return b.performAction(AccessibilityNodeInfo.ACTION_CLICK) || clickNode(b);
+    }
+
+    /** 슬라이더에 값을 바로 넣어 본다(접근성 '값 설정'). 안 되면 false — 버튼으로 맞춘다. */
+    private boolean heatSetSlider(int idx, int target) {
+        List<AccessibilityNodeInfo> rows = heatRows();
+        if (idx >= rows.size()) return false;
+        List<AccessibilityNodeInfo> sliders = new ArrayList<>();
+        for (AccessibilityNodeInfo n : allNodes(rows.get(idx))) {
+            if (n.getClassName() != null && n.getClassName().toString().endsWith("SeekBar")) sliders.add(n);
+        }
+        for (int i = sliders.size() - 1; i >= 0; i--) {      // 안쪽(손잡이) 것부터
+            android.os.Bundle args = new android.os.Bundle();
+            args.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, (float) target);
+            if (sliders.get(i).performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId(), args)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 한 칸을 목표 온도로. 마지막으로 읽은 값(-1 = 읽지 못함). */
+    private int heatDrive(int idx, int target) {
+        int cur = heatAt(idx);
+        if (cur < 0 || cur == target) return cur;
+        if (Math.abs(cur - target) > 2 && !stopRequested && heatSetSlider(idx, target)) {
+            int v = heatWaitChange(idx, cur, pick(1500, 1200, 900));
+            log("  칸" + (idx + 1) + " 슬라이더로 " + cur + " → " + target + " 시도 → 읽은 값 " + v);
+            if (v == target) return v;
+            if (v >= 0) cur = v;
+        }
+        int stuck = 0;
+        int sign = Integer.signum(target - cur);
+        for (int i = 0; i < 90 && !stopRequested; i++) {
+            cur = heatAt(idx);
+            if (cur < 0 || cur == target) return cur;
+            if (Integer.signum(target - cur) != sign) {
+                log("  칸" + (idx + 1) + " 목표 " + target + "를 지나쳐 " + cur + "에서 멈춤 (한 번에 바뀌는 폭이 1이 아님)");
+                return cur;
+            }
+            if (!heatPress(idx, target > cur)) {
+                log("  칸" + (idx + 1) + " " + (target > cur ? "＋" : "－") + " 버튼을 더 누를 수 없음 (" + cur + "℃에서 한계)");
+                return cur;
+            }
+            int nv = heatWaitChange(idx, cur, pick(1500, 1000, 700));
+            if (nv == cur) {
+                if (++stuck >= 3) {
+                    log("  칸" + (idx + 1) + " 버튼을 눌러도 값이 안 바뀜 (" + cur + "℃)");
+                    return cur;
+                }
+            } else {
+                stuck = 0;
+            }
+        }
+        return heatAt(idx);
+    }
+
+    /** '일괄 온도 설정' 체크를 want로. 원하는 상태가 확인되면 true. 상태를 못 읽거나 안 바뀌면 false. */
+    private boolean heatSetBatch(boolean want) {
+        AccessibilityNodeInfo cb = findById(ID_TEMP_BATCH);
+        if (cb == null) {
+            log("일괄 온도 설정 체크를 찾지 못함");
+            return false;
+        }
+        if (!cb.isCheckable()) {
+            log("일괄 온도 설정: 체크 상태를 읽을 수 없음");
+            return false;
+        }
+        log("일괄 온도 설정: 지금 " + (cb.isChecked() ? "켜짐" : "꺼짐") + " → " + (want ? "켜기" : "끄기") + " 필요: " + (cb.isChecked() != want));
+        if (cb.isChecked() == want) return true;
+        if (!cb.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(cb)) return false;
+        sleep(pick(500, 350, 250));
+        AccessibilityNodeInfo again = waitFor(() -> {
+            AccessibilityNodeInfo n = findById(ID_TEMP_BATCH);
+            return (n != null && n.isChecked() == want) ? n : null;
+        }, 1500);
+        if (again == null) log("일괄 온도 설정을 눌렀지만 바뀐 것을 확인하지 못함");
+        return again != null;
+    }
+
+    /** 온도 창을 연 채 실패했을 때: 완료는 누르지 않고 닫는다. */
+    private void heatCloseWithoutDone() {
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        waitFor(() -> heatRows().isEmpty() ? getRootInActiveWindow() : null, 2500);
+    }
+
+    /**
+     * 온열: 기기 화면의 온도 버튼 → 온도 창 → 칸별 온도 맞추기 → ✓ 완료.
+     * 확인은 창에 표시된 설정값을 다시 읽어서 한다. 목표와 다르면 완료를 누르지 않고 닫는다.
+     */
+    private Result setHeat(Config c, int mode) {
+        final int[] want = heatTargets(mode);
+        final boolean batch = heatUsesBatch(mode);
+        final String label = modeLabel(mode);
+        sleep(pick(1200, 800, 500));
+        showModePages();
+
+        AccessibilityNodeInfo btn = findCenteredOrVisible(ID_TEMP_BTN);
+        if (btn == null) {
+            goToFirstPage();
+            btn = findCenteredOrVisible(ID_TEMP_BTN);
+        }
+        if (btn == null) {
+            log("온도 버튼을 찾지 못함");
+            snapshot("온열: 온도 버튼 없음");
+            return Result.fail("온도 버튼을 찾지 못함");
+        }
+        log("온도 버튼: " + btn.getText());
+        if (!btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) && !clickNode(btn)) {
+            return Result.fail("온도 버튼을 누르지 못함");
+        }
+        AccessibilityNodeInfo sheet = waitFor(() -> heatRows().isEmpty() ? null : getRootInActiveWindow(), 5000);
+        if (sheet == null) {
+            log("온도 창이 뜨지 않음");
+            snapshot("온열: 온도 버튼 누른 뒤");
+            return Result.fail("온도 창이 열리지 않음");
+        }
+        sleep(pick(600, 400, 250));
+        final int[] before = heatReadAll();
+        log("온도 창 열림 — " + before.length + "칸: " + heatStr(before));
+        AccessibilityNodeInfo mx = findById(ID_TEMP_MAX);
+        if (mx != null) log("최고 온도 항목: " + (mx.isChecked() ? "켜짐" : "꺼짐"));
+
+        boolean needAll = !batch;      // 기본·복부만은 4칸이 다 보여야 칸 번호가 맞다
+        if (before.length < 1 || (needAll && before.length != 4)) {
+            snapshot("온열: 칸 수 이상");
+            heatCloseWithoutDone();
+            return Result.fail("온도 칸이 " + before.length + "개만 보임 (4칸이어야 함)");
+        }
+        for (int i = 0; i < before.length; i++) {
+            if (before[i] < 0) {
+                snapshot("온열: 값 읽기 실패");
+                heatCloseWithoutDone();
+                return Result.fail("온도 창에서 " + (i + 1) + "번째 칸의 값을 읽지 못함");
+            }
+        }
+
+        // 이미 목표와 같으면 만질 필요 없음
+        boolean already = true;
+        for (int i = 0; i < before.length && i < 4; i++) if (want[i] >= 0 && before[i] != want[i]) already = false;
+        if (already) {
+            log("이미 목표 온도 — 바꿀 것 없음");
+        } else if (batch) {
+            boolean on = heatSetBatch(true);
+            if (stopRequested) { heatCloseWithoutDone(); return Result.fail("중지됨"); }
+            int got = heatDrive(0, want[0]);
+            int[] now = heatReadAll();
+            log("일괄로 첫 칸을 " + want[0] + "로 → 지금 " + heatStr(now) + (on ? "" : " (일괄 체크 확인 못함)"));
+            boolean allSame = now.length == before.length;
+            for (int v : now) if (v != want[0]) allSame = false;
+            if (!allSame && !stopRequested) {
+                // 일괄이 안 따라온 칸은 일괄을 끄고 칸마다 따로 맞춘다
+                log("일괄로 다 안 맞음 → 일괄을 끄고 칸마다 따로 맞춤");
+                heatSetBatch(false);
+                for (int i = 0; i < now.length && !stopRequested; i++) {
+                    if (heatAt(i) != want[0]) heatDrive(i, want[0]);
+                }
+            }
+        } else {
+            boolean off = heatSetBatch(false);
+            if (!off) log("일괄 체크가 꺼졌는지 확인하지 못함 — 계속하되 마지막에 값을 다시 확인");
+            // 아래 칸부터: 혹시 일괄이 켜져 있어도 위 칸들이 나중에 맞춰지게
+            for (int i = Math.min(3, before.length - 1); i >= 0 && !stopRequested; i--) {
+                if (want[i] < 0) continue;
+                int got = heatDrive(i, want[i]);
+                log("칸" + (i + 1) + " → " + want[i] + " : 읽은 값 " + got);
+            }
+        }
+        if (stopRequested) {
+            heatCloseWithoutDone();
+            return Result.fail("중지됨");
+        }
+
+        // 확인: 창에 표시된 값을 다시 읽는다
+        sleep(pick(500, 350, 250));
+        final int[] after = heatReadAll();
+        log("최종 확인: " + heatStr(after) + " (처음 " + heatStr(before) + ")");
+        boolean good = after.length == before.length;
+        for (int i = 0; i < after.length && i < 4; i++) {
+            int goal = want[i] >= 0 ? want[i] : before[i];      // 건드리지 않는 칸은 처음 값 그대로여야 한다
+            if (after[i] != goal) good = false;
+        }
+        if (!good) {
+            issues++;
+            snapshot("온열: 목표와 다름");
+            heatCloseWithoutDone();
+            return Result.fail(label + " — 목표와 다름: 지금 " + heatStr(after) + "℃ (목표 "
+                    + (mode == MODE_HEAT_ABD ? "맨 아래 50" : heatStr(want)) + "). 완료를 누르지 않고 창을 닫음 — 직접 확인");
+        }
+
+        // ✓ 완료
+        AccessibilityNodeInfo doneBtn = findById(ID_SHEET_DONE);
+        if (doneBtn == null) doneBtn = visibleTextContaining("완료");
+        if (doneBtn == null) {
+            snapshot("온열: 완료 버튼 없음");
+            heatCloseWithoutDone();
+            return Result.fail("온도 창의 완료 버튼을 찾지 못함");
+        }
+        if (!doneBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(doneBtn);
+        AccessibilityNodeInfo closed = waitFor(() -> heatRows().isEmpty() ? getRootInActiveWindow() : null, 4000);
+        if (closed == null) {
+            log("완료를 눌렀지만 창이 안 닫힘 → 한 번 더");
+            AccessibilityNodeInfo d2 = findById(ID_SHEET_DONE);
+            if (d2 != null && !d2.performAction(AccessibilityNodeInfo.ACTION_CLICK)) clickNode(d2);
+            closed = waitFor(() -> heatRows().isEmpty() ? getRootInActiveWindow() : null, 3000);
+        }
+        sleep(pick(600, 400, 250));
+        AccessibilityNodeInfo tb = findCenteredOrVisible(ID_TEMP_BTN);
+        log("완료 후 온도 버튼: " + (tb == null ? "안 보임" : String.valueOf(tb.getText())));
+        if (closed == null) {
+            snapshot("온열: 완료 후에도 창이 열려 있음");
+            return Result.skip(label + " — 값은 맞췄지만 창이 닫히지 않음 (직접 확인)");
+        }
+        if (already) return Result.skip("이미 " + (mode == MODE_HEAT_ABD ? "맨 아래 50" : heatStr(want)) + "℃");
+        if (mode == MODE_HEAT_ABD) return Result.ok("복부(맨 아래) 50℃ — 위 3칸은 그대로 " + heatStr(java.util.Arrays.copyOf(after, 3)));
+        return Result.ok(label + " — " + heatStr(after) + "℃");
     }
 
     private static final String ID_SPEED_BTN = "kr.co.ceragem.iot:id/open_spine_mode_speeds";
