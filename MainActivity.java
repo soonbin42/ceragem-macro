@@ -193,9 +193,11 @@ public class MainActivity extends Activity {
         if (mode == MacroService.MODE_CHECK) {
             pendingCheck = null;
         }
-        // 점검 다음 동작을 시작하면 '달랐던 곳' 빨간 테두리는 지운다
-        Config.setDiffDevs(this, new ArrayList<Integer>());
-        cfg.diffDevs.clear();
+        // 점검 다음 동작을 시작하면 '달랐던 곳' 빨간 테두리는 지운다 (온열은 켜짐·실행 상태와 상관없으니 그대로 둔다)
+        if (!MacroService.isHeatMode(mode)) {
+            Config.setDiffDevs(this, new ArrayList<Integer>());
+            cfg.diffDevs.clear();
+        }
         boolean started = svc.start(mode, speedLabel);
         updateAll();
         return started;
@@ -261,6 +263,8 @@ public class MainActivity extends Activity {
     }
 
     /** 화면이 짧은 폰(예: A25 + 화면 확대)이면 여백·높이를 줄여서 시간 카드까지 한 화면에 보이게 한다. */
+    /** 화면(MainActivity) 파일의 버전. 맨 아래에 표시해서, 올린 파일이 실제로 설치됐는지 눈으로 확인한다. */
+    private static final String SCREEN_VER = "v26";
     private boolean compact = false;
 
     private void buildUi() {
@@ -365,14 +369,14 @@ public class MainActivity extends Activity {
         row3.addView(applyButton);
         root.addView(row3);
 
-        // 온열: 끄기 · 기본 · 높게 · 복부만 높게 (모양만 먼저 — 세라젬 온도 창 조작은 아직 연결 전)
+        // 온열: 끄기 · 기본 · 높게 · 복부만 높게 — 세라젬 온도 창을 열어 맞춘다 (점검은 이 창을 열지 않음)
         LinearLayout heatRow = new LinearLayout(this);
         heatRow.setOrientation(LinearLayout.HORIZONTAL);
         heatRow.setBaselineAligned(false);
-        heatRow.addView(heatButton("온열 끄기", "전부 0", Color.parseColor("#EAE3DF"), Color.parseColor("#A59A90"), Color.parseColor("#222222")));
-        heatRow.addView(heatButton("온열 기본", "44·44·44·37", Color.parseColor("#E8A33D"), Color.parseColor("#E8A33D"), Color.parseColor("#2B1D16")));
-        heatRow.addView(heatButton("온열 높게", "전부 50", Color.parseColor("#D4501E"), Color.parseColor("#D4501E"), Color.WHITE));
-        heatRow.addView(heatButton("복부만 높게", "맨 아래 50", Color.parseColor("#FBE3D6"), Color.parseColor("#D4501E"), Color.parseColor("#8A2E0E")));
+        heatRow.addView(heatButton(MacroService.MODE_HEAT_OFF, "온열 끄기", "전부 0", Color.parseColor("#EAE3DF"), Color.parseColor("#A59A90"), Color.parseColor("#222222")));
+        heatRow.addView(heatButton(MacroService.MODE_HEAT_BASE, "온열 기본", "44·44·44·37", Color.parseColor("#E8A33D"), Color.parseColor("#E8A33D"), Color.parseColor("#2B1D16")));
+        heatRow.addView(heatButton(MacroService.MODE_HEAT_HIGH, "온열 높게", "전부 50", Color.parseColor("#D4501E"), Color.parseColor("#D4501E"), Color.WHITE));
+        heatRow.addView(heatButton(MacroService.MODE_HEAT_ABD, "복부만 높게", "맨 아래 50", Color.parseColor("#FBE3D6"), Color.parseColor("#D4501E"), Color.parseColor("#8A2E0E")));
         root.addView(heatRow);
 
         // 실행 후 경과 시간 (버튼 한 줄 아래)
@@ -526,6 +530,17 @@ public class MainActivity extends Activity {
         shareDumpButton = smallButton("분석 결과 공유");
         shareDumpButton.setOnClickListener(v -> shareDump());
         dumpCard.addView(shareDumpButton);
+
+        // 어느 버전이 깔려 있는지 확인용 (맨 아래)
+        String appVer = "?";
+        try {
+            appVer = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+        TextView verView = text("화면 " + SCREEN_VER + " · 앱 " + appVer, 12, MUTED, false);
+        verView.setGravity(Gravity.CENTER);
+        verView.setPadding(0, dp(16), 0, dp(8));
+        root.addView(verView);
 
         setContentView(scroll);
         rebuildBeds();
@@ -996,8 +1011,29 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    /** 온열 버튼을 눌렀을 때. 50℃로 올리는 두 가지는 잘못 눌렀을 때를 막으려고 한 번 물어본다. */
+    private void onHeat(final int mode, final String label) {
+        syncFromPrefs();
+        final int n = cfg.selectedList().size();
+        if (mode == MacroService.MODE_HEAT_HIGH || mode == MacroService.MODE_HEAT_ABD) {
+            if (n == 0) {
+                startMode(mode, "");      // 선택된 기기가 없다는 안내가 나온다
+                return;
+            }
+            String what = mode == MacroService.MODE_HEAT_HIGH ? "네 칸 모두 50℃" : "맨 아래 칸만 50℃";
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle(label)
+                    .setMessage("선택한 " + n + "대의 온열을 " + what + "로 올릴까요?\n(전원이 켜진 기기만 바뀌어요)")
+                    .setPositiveButton("올리기", (d, w) -> startMode(mode, ""))
+                    .setNegativeButton("취소", null)
+                    .show();
+            return;
+        }
+        startMode(mode, "");
+    }
+
     /** 온열 버튼 한 칸: 위에 이름, 아래에 작은 글씨로 값. 네 칸이 같은 폭. */
-    private Button heatButton(final String label, String sub, int bg, int stroke, int fg) {
+    private Button heatButton(final int mode, final String label, String sub, int bg, int stroke, int fg) {
         Button b = new Button(this);
         b.setAllCaps(false);
         b.setIncludeFontPadding(false);
@@ -1017,8 +1053,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(compact ? 46 : 54), 1f);
         lp.setMargins(dp(3), dp(compact ? 6 : 10), dp(3), 0);
         b.setLayoutParams(lp);
-        b.setOnClickListener(v -> Toast.makeText(this,
-                label + " — 세라젬 온도 창 조작은 아직 연결 전이에요 (모양만 먼저 넣었어요)", Toast.LENGTH_LONG).show());
+        b.setOnClickListener(v -> onHeat(mode, label));
         return b;
     }
 
